@@ -45,6 +45,7 @@ async fn run_inner(
     notify_settings: NotifySettings,
 ) -> Result<()> {
     let mut app = App::new(config.clone(), model)?;
+    app.persist_current_session();
 
     // Welcome message
     app.chat_messages.push(ChatMessage {
@@ -62,9 +63,7 @@ async fn run_inner(
     });
 
     // Load sessions into sidebar on start
-    if let Ok(sessions) = app.store.list() {
-        app.sessions = sessions;
-    }
+    app.refresh_sessions_cache();
 
     let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(256);
     // Channel for background model discovery
@@ -141,6 +140,7 @@ async fn submit_message(
     app.push_user_message(&prompt);
     app.messages.push(Message::user(&prompt));
     app.session.push(Message::user(&prompt));
+    app.persist_current_session();
     app.thinking = true;
     app.begin_assistant_message();
 

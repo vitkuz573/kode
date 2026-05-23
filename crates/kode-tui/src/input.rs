@@ -123,6 +123,7 @@ fn handle_chat_key(app: &mut App, key: KeyEvent) -> InputAction {
             let text = app.input.trim().to_string();
             app.input.clear();
             app.cursor = 0;
+            app.reset_input_history_nav();
             return InputAction::Submit(text);
         }
 
@@ -133,29 +134,34 @@ fn handle_chat_key(app: &mut App, key: KeyEvent) -> InputAction {
                 let b = char_to_byte(&app.input, app.cursor);
                 app.input.remove(b);
             }
+            app.reset_input_history_nav();
         }
         (_, KeyCode::Delete) => {
             if app.cursor < char_len(&app.input) {
                 let b = char_to_byte(&app.input, app.cursor);
                 app.input.remove(b);
             }
+            app.reset_input_history_nav();
         }
-        (_, KeyCode::Left)  => { if app.cursor > 0 { app.cursor -= 1; } }
-        (_, KeyCode::Right) => { if app.cursor < char_len(&app.input) { app.cursor += 1; } }
-        (_, KeyCode::Home)  => { app.cursor = 0; }
-        (_, KeyCode::End)   => { app.cursor = char_len(&app.input); }
+        (_, KeyCode::Left)  => { if app.cursor > 0 { app.cursor -= 1; } app.reset_input_history_nav(); }
+        (_, KeyCode::Right) => { if app.cursor < char_len(&app.input) { app.cursor += 1; } app.reset_input_history_nav(); }
+        (_, KeyCode::Home)  => { app.cursor = 0; app.reset_input_history_nav(); }
+        (_, KeyCode::End)   => { app.cursor = char_len(&app.input); app.reset_input_history_nav(); }
 
         // ── Scroll ──
-        (_, KeyCode::Up)     => { app.scroll = app.scroll.saturating_sub(1); app.auto_scroll = false; }
-        (_, KeyCode::Down)   => { app.scroll += 1; }
+        (KeyModifiers::CONTROL, KeyCode::Up) => { app.scroll = app.scroll.saturating_sub(1); app.auto_scroll = false; }
+        (KeyModifiers::CONTROL, KeyCode::Down) => { app.scroll += 1; app.auto_scroll = false; }
+        (_, KeyCode::Up)     => { app.history_up(); }
+        (_, KeyCode::Down)   => { app.history_down(); }
         (_, KeyCode::PageUp) => { app.scroll = app.scroll.saturating_sub(10); app.auto_scroll = false; }
-        (_, KeyCode::PageDown) => { app.scroll += 10; }
+        (_, KeyCode::PageDown) => { app.scroll += 10; app.auto_scroll = false; }
 
         // ── Typing ──
         (_, KeyCode::Char(c)) => {
             let b = char_to_byte(&app.input, app.cursor);
             app.input.insert(b, c);
             app.cursor += 1;
+            app.reset_input_history_nav();
         }
         _ => {}
     }

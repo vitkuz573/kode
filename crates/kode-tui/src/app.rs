@@ -3,7 +3,7 @@ use kode_agent::AgentEvent;
 use kode_core::{
     config::Config,
     session::{Session, SessionStore, TodoItem},
-    types::Message,
+    types::{Message, Role},
 };
 use kode_llm::ModelRouter;
 use std::collections::HashSet;
@@ -71,7 +71,8 @@ pub fn all_commands() -> Vec<Command> {
         Command { key: "Ctrl+R",     label: "refresh models", description: "Re-discover models from provider" },
         Command { key: "Ctrl+Y",     label: "todo",           description: "Open TODO manager" },
         Command { key: "Ctrl+F",     label: "files",          description: "Open changed files manager" },
-        Command { key: "↑↓",         label: "scroll",         description: "Scroll messages" },
+        Command { key: "↑↓",         label: "history",        description: "Recall previous user messages into input" },
+        Command { key: "Ctrl+↑↓",    label: "scroll",         description: "Scroll messages" },
         Command { key: "PgUp/PgDn",  label: "page scroll",    description: "Scroll by page" },
         Command { key: "Home/End",   label: "cursor",         description: "Move cursor to start/end" },
         Command { key: "Shift+Enter",label: "newline",        description: "Insert a new line in input" },
@@ -88,6 +89,8 @@ pub struct App {
     pub chat_messages: Vec<ChatMessage>,
     pub input: String,
     pub cursor: usize,
+    pub input_history_cursor: Option<usize>,
+    pub input_draft: String,
     pub scroll: usize,
     pub auto_scroll: bool,
 
@@ -158,6 +161,8 @@ impl App {
             chat_messages: Vec::new(),
             input: String::new(),
             cursor: 0,
+            input_history_cursor: None,
+            input_draft: String::new(),
             scroll: 0,
             auto_scroll: true,
             thinking: false,
@@ -199,6 +204,17 @@ impl App {
         let _ = self.config.save();
     }
 
+    pub fn refresh_sessions_cache(&mut self) {
+        if let Ok(sessions) = self.store.list() {
+            self.sessions = sessions;
+        }
+    }
+
+    pub fn persist_current_session(&mut self) {
+        let _ = self.store.save(&self.session);
+        self.refresh_sessions_cache();
+    }
+
     pub fn tick_spinner(&mut self) {
         if self.thinking {
             self.spinner_tick += 1;
@@ -229,12 +245,72 @@ impl App {
             tool_calls: Vec::new(),
             is_streaming: false,
         });
+        self.persist_current_session();
     }
 
     pub fn clear_chat(&mut self) {
         self.chat_messages.clear();
         self.scroll = 0;
         self.auto_scroll = true;
+    }
+
+    pub fn reset_input_history_nav(&mut self) {
+        self.input_history_cursor = None;
+        self.input_draft.clear();
+    }
+
+    pub fn history_up(&mut self) {
+        let user_msgs: Vec<&String> = self
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::User && !m.content.trim().is_empty())
+            .map(|m| &m.content)
+            .collect();
+        if user_msgs.is_empty() {
+            return;
+        }
+
+        if self.input_history_cursor.is_none() {
+            self.input_draft = self.input.clone();
+            self.input_history_cursor = Some(user_msgs.len().saturating_sub(1));
+        } else if let Some(idx) = self.input_history_cursor {
+            self.input_history_cursor = Some(idx.saturating_sub(1));
+        }
+
+        if let Some(idx) = self.input_history_cursor {
+            if let Some(text) = user_msgs.get(idx) {
+                self.input = (*text).clone();
+                self.cursor = self.input.chars().count();
+            }
+        }
+    }
+
+    pub fn history_down(&mut self) {
+        let user_msgs: Vec<&String> = self
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::User && !m.content.trim().is_empty())
+            .map(|m| &m.content)
+            .collect();
+        let Some(idx) = self.input_history_cursor else { return; };
+        if user_msgs.is_empty() {
+            self.input_history_cursor = None;
+            return;
+        }
+
+        if idx + 1 >= user_msgs.len() {
+            self.input_history_cursor = None;
+            self.input = self.input_draft.clone();
+            self.cursor = self.input.chars().count();
+            return;
+        }
+
+        let next = idx + 1;
+        self.input_history_cursor = Some(next);
+        if let Some(text) = user_msgs.get(next) {
+            self.input = (*text).clone();
+            self.cursor = self.input.chars().count();
+        }
     }
 
     pub fn push_user_message(&mut self, text: &str) {
@@ -378,13 +454,13 @@ impl App {
                 self.thinking = false;
                 self.persist_assistant_artifacts();
                 self.finish_assistant_message();
-                let _ = self.store.save(&self.session);
+                self.persist_current_session();
             }
             AgentEvent::Done => {
                 self.thinking = false;
                 self.persist_assistant_artifacts();
                 self.finish_assistant_message();
-                let _ = self.store.save(&self.session);
+                self.persist_current_session();
             }
             AgentEvent::Error(e) => {
                 self.thinking = false;

@@ -127,7 +127,7 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    let keybinds = " ^P palette  ^B sidebar  Tab sessions  ^K model  ^T theme  ^Y todo  ^F files  ⇧Enter newline  ^C quit ";
+    let keybinds = " ^P palette  ^B sidebar  Tab sessions  ^K model  ^T theme  ^Y todo  ^F files  ↑↓ history  ^C quit ";
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let pad = (area.width as usize).saturating_sub(used + keybinds.chars().count());
     spans.push(Span::styled(
@@ -369,7 +369,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let (border_color, title) = if app.thinking {
         (t.yellow, format!(" {} waiting response… ", app.spinner()))
     } else {
-        (t.accent, " message  Enter send  Shift+Enter newline  ↑↓ scroll  ^P palette ".to_string())
+        (t.accent, " message  Enter send  Shift+Enter newline  ↑↓ history  PgUp/PgDn scroll  ^P palette ".to_string())
     };
 
     let block = Block::default()
