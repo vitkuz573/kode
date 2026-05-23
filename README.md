@@ -67,13 +67,25 @@ kode config          # show config path
 Config is auto-created at `~/.config/kode/config.toml` on first run.
 
 ```toml
-model = "omniroute/kr/auto"
+model = "openai/gpt-4o"
 
-[providers.omniroute]
-base_url = "http://127.0.0.1:20128/v1"
-api_key = "sk-..."
-name = "OmniRoute"
-models = ["kr/auto"]
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+api_key = "$OPENAI_API_KEY"
+name = "OpenAI"
+models = ["gpt-4o", "gpt-4o-mini"]
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+api_key = "$ANTHROPIC_API_KEY"
+api_style = "anthropic"
+models = ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-3-5"]
+
+# Custom OpenAI-compatible provider
+[providers.local]
+base_url = "http://localhost:11434/v1"
+api_key = "ollama"
+models = ["llama3.2", "qwen2.5-coder"]
 
 [agent]
 max_steps = 32

@@ -149,23 +149,34 @@ impl Config {
         self
     }
 
-    /// Bootstrap config pre-populated from opencode settings
+    /// Bootstrap config with placeholder values — user must fill in their own credentials
     pub fn default_config() -> Self {
         let mut providers = HashMap::new();
         providers.insert(
-            "omniroute".into(),
+            "openai".into(),
             ProviderConfig {
-                base_url: "http://127.0.0.1:20128/v1".into(),
-                api_key: "sk-c34f1467d7d44f25-82f707-08b539d2".into(),
-                name: Some("OmniRoute".into()),
-                models: vec!["kr/auto".into()],
+                base_url: "https://api.openai.com/v1".into(),
+                api_key: "$OPENAI_API_KEY".into(),
+                name: Some("OpenAI".into()),
+                models: vec!["gpt-4o".into(), "gpt-4o-mini".into()],
                 api_style: ApiStyle::OpenAI,
+                anthropic_version: default_anthropic_version(),
+            },
+        );
+        providers.insert(
+            "anthropic".into(),
+            ProviderConfig {
+                base_url: "https://api.anthropic.com".into(),
+                api_key: "$ANTHROPIC_API_KEY".into(),
+                name: Some("Anthropic".into()),
+                models: vec!["claude-opus-4-5".into(), "claude-sonnet-4-5".into(), "claude-haiku-3-5".into()],
+                api_style: ApiStyle::Anthropic,
                 anthropic_version: default_anthropic_version(),
             },
         );
         Self {
             providers,
-            model: Some("omniroute/kr/auto".into()),
+            model: Some("openai/gpt-4o".into()),
             agent: AgentConfig::default(),
             context: ContextConfig::default(),
             cost: CostConfig { show: true, budget_usd: 0.0 },
