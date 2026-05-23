@@ -24,6 +24,10 @@ pub struct Config {
     /// Cost tracking
     #[serde(default)]
     pub cost: CostConfig,
+
+    /// Preferred TUI theme name
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +184,7 @@ impl Config {
             agent: AgentConfig::default(),
             context: ContextConfig::default(),
             cost: CostConfig { show: true, budget_usd: 0.0 },
+            theme: Some("catppuccin-mocha".into()),
         }
     }
 

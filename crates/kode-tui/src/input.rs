@@ -64,6 +64,14 @@ fn handle_chat_key(app: &mut App, key: KeyEvent) -> InputAction {
             app.model_cursor = app.model_list.iter().position(|m| m == &app.model).unwrap_or(0);
             app.mode = AppMode::ModelPicker;
         }
+        (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+            app.model_cursor = app.model_list.iter().position(|m| m == &app.model).unwrap_or(0);
+            app.mode = AppMode::ModelPicker;
+        }
+        (KeyModifiers::CONTROL, KeyCode::Enter) => {
+            app.model_cursor = app.model_list.iter().position(|m| m == &app.model).unwrap_or(0);
+            app.mode = AppMode::ModelPicker;
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
             app.theme_cursor = app.theme_list.iter().position(|n| *n == app.theme.name).unwrap_or(0);
             app.mode = AppMode::ThemePicker;
@@ -226,21 +234,39 @@ fn handle_model_key(app: &mut App, key: KeyEvent) -> InputAction {
 
 fn handle_theme_key(app: &mut App, key: KeyEvent) -> InputAction {
     match key.code {
-        KeyCode::Esc => { app.mode = AppMode::Chat; }
-        KeyCode::Up => { app.theme_cursor = app.theme_cursor.saturating_sub(1); }
+        KeyCode::Esc => {
+            app.persist_theme_preference();
+            app.mode = AppMode::Chat;
+        }
+        KeyCode::Up => {
+            app.theme_cursor = app.theme_cursor.saturating_sub(1);
+            if let Some(name) = app.theme_list.get(app.theme_cursor) {
+                app.theme = Theme::by_name(name);
+            }
+        }
         KeyCode::Down => {
             if app.theme_cursor + 1 < app.theme_list.len() { app.theme_cursor += 1; }
+            if let Some(name) = app.theme_list.get(app.theme_cursor) {
+                app.theme = Theme::by_name(name);
+            }
         }
         KeyCode::PageUp => {
             app.theme_cursor = app.theme_cursor.saturating_sub(10);
+            if let Some(name) = app.theme_list.get(app.theme_cursor) {
+                app.theme = Theme::by_name(name);
+            }
         }
         KeyCode::PageDown => {
             app.theme_cursor = (app.theme_cursor + 10).min(app.theme_list.len().saturating_sub(1));
+            if let Some(name) = app.theme_list.get(app.theme_cursor) {
+                app.theme = Theme::by_name(name);
+            }
         }
         KeyCode::Enter => {
             if let Some(name) = app.theme_list.get(app.theme_cursor) {
                 app.theme = Theme::by_name(name);
             }
+            app.persist_theme_preference();
             app.mode = AppMode::Chat;
         }
         // Live preview on arrow keys
@@ -297,6 +323,10 @@ fn execute_command(app: &mut App, key: &str) -> InputAction {
             app.mode = AppMode::SessionList;
         }
         "Ctrl+M"     => {
+            app.model_cursor = app.model_list.iter().position(|m| m == &app.model).unwrap_or(0);
+            app.mode = AppMode::ModelPicker;
+        }
+        "Ctrl+K"     => {
             app.model_cursor = app.model_list.iter().position(|m| m == &app.model).unwrap_or(0);
             app.mode = AppMode::ModelPicker;
         }

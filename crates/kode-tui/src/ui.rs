@@ -107,7 +107,7 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(t.yellow).bg(t.mantle).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
-            " thinking…",
+            " waiting response…",
             Style::default().fg(t.yellow).bg(t.mantle),
         ));
     }
@@ -119,7 +119,7 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    let keybinds = " ^P palette  ^B sidebar  Tab sessions  ^M model  ^T theme  ⇧Enter newline  ^C quit ";
+    let keybinds = " ^P palette  ^B sidebar  Tab sessions  ^K model  ^T theme  ⇧Enter newline  ^C quit ";
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let pad = (area.width as usize).saturating_sub(used + keybinds.chars().count());
     spans.push(Span::styled(
@@ -140,7 +140,7 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let model_part = format!(" {} ", truncate(&app.model, 42));
-    let mode_part = if app.thinking { " running " } else { " idle " };
+    let mode_part = if app.thinking { " waiting " } else { " idle " };
     let stats = format!(
         " ↑{} ↓{}  ${:.5}  {}ms  {} msgs ",
         app.total_prompt_tokens,
@@ -277,7 +277,7 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let (border_color, title) = if app.thinking {
-        (t.yellow, format!(" {} thinking… ", app.spinner()))
+        (t.yellow, format!(" {} waiting response… ", app.spinner()))
     } else {
         (t.accent, " message  Enter send  Shift+Enter newline  ↑↓ scroll  ^P palette ".to_string())
     };

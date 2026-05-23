@@ -60,7 +60,7 @@ pub fn all_commands() -> Vec<Command> {
         Command { key: "Ctrl+C",     label: "quit",           description: "Exit kode" },
         Command { key: "Ctrl+B",     label: "sidebar",        description: "Toggle session sidebar" },
         Command { key: "Tab",        label: "sessions",       description: "Open session list" },
-        Command { key: "Ctrl+M",     label: "model",          description: "Switch model" },
+        Command { key: "Ctrl+K",     label: "model",          description: "Switch model" },
         Command { key: "Ctrl+T",     label: "theme",          description: "Switch color theme" },
         Command { key: "Ctrl+P",     label: "palette",        description: "Command palette" },
         Command { key: "Ctrl+N",     label: "new session",    description: "Start a new session" },
@@ -139,6 +139,9 @@ impl App {
         let session = Session::new(&model);
         let model_list = router.list_models();
         let theme_list = Theme::all();
+        let theme_name = config.theme.as_deref().unwrap_or(CATPPUCCIN_MOCHA.name);
+        let theme = Theme::by_name(theme_name);
+        let theme_cursor = theme_list.iter().position(|n| *n == theme.name).unwrap_or(0);
         let commands = all_commands();
         Ok(Self {
             mode: AppMode::Chat,
@@ -161,9 +164,9 @@ impl App {
             model_list,
             model_cursor: 0,
             models_loading: false,
-            theme: CATPPUCCIN_MOCHA,
+            theme,
             theme_list,
-            theme_cursor: 0,
+            theme_cursor,
             commands,
             command_cursor: 0,
             command_filter: String::new(),
@@ -176,6 +179,11 @@ impl App {
             mouse_x: 0,
             mouse_y: 0,
         })
+    }
+
+    pub fn persist_theme_preference(&mut self) {
+        self.config.theme = Some(self.theme.name.to_string());
+        let _ = self.config.save();
     }
 
     pub fn tick_spinner(&mut self) {

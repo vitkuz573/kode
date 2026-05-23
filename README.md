@@ -101,6 +101,14 @@ KODE_MOCK_BIND=127.0.0.1:8787
 KODE_MOCK_TIMEOUT_MS=15000
 ```
 
+Integration test (mock + CLI contract):
+
+```bash
+cargo test --test mock_e2e
+```
+
+Note: this test needs permission to bind a local TCP socket (`127.0.0.1`).
+
 ## TUI Keybindings
 
 | Key | Action |
