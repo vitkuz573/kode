@@ -15,15 +15,17 @@ use kode_tui::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
+use crate::notify;
+use crate::notify::NotifySettings;
 
-pub async fn run(config: Config, model: String) -> Result<()> {
+pub async fn run(config: Config, model: String, notify_settings: NotifySettings) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_inner(&mut terminal, config, model).await;
+    let result = run_inner(&mut terminal, config, model, notify_settings).await;
 
     disable_raw_mode()?;
     execute!(
@@ -40,6 +42,7 @@ async fn run_inner(
     terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
     config: Config,
     model: String,
+    notify_settings: NotifySettings,
 ) -> Result<()> {
     let mut app = App::new(config.clone(), model)?;
 
@@ -73,7 +76,18 @@ async fn run_inner(
 
         // Drain agent events
         while let Ok(event) = agent_rx.try_recv() {
+            let notify = match &event {
+                AgentEvent::Done => Some(true),
+                AgentEvent::Error(_) => Some(false),
+                _ => None,
+            };
             app.handle_agent_event(event);
+            if let Some(success) = notify {
+                let response_ms = Some(app.last_response_ms);
+                if notify::should_notify(notify_settings, success, response_ms) {
+                    notify::notify_completion(success, &app.model, response_ms);
+                }
+            }
         }
 
         // Drain model discovery results

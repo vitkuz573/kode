@@ -21,6 +21,8 @@ use tracing_subscriber::EnvFilter;
 use serde_json::json;
 
 mod tui_runner;
+mod notify;
+use notify::NotifySettings;
 
 #[derive(Parser)]
 #[command(
@@ -53,6 +55,16 @@ struct Cli {
     /// Output machine-readable JSON (subcommands only)
     #[arg(long, global = true)]
     json: bool,
+
+    /// Enable desktop notifications on completion/error
+    #[arg(long, global = true, env = "KODE_NOTIFY", default_value_t = true)]
+    notify: bool,
+    /// Notify only on errors
+    #[arg(long, global = true, env = "KODE_NOTIFY_ERRORS_ONLY", default_value_t = false)]
+    notify_errors_only: bool,
+    /// Notify on success only if response took at least this many milliseconds
+    #[arg(long, global = true, env = "KODE_NOTIFY_MIN_MS", default_value_t = 0)]
+    notify_min_ms: u64,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -115,6 +127,11 @@ async fn run() -> Result<()> {
         .clone()
         .or_else(|| config.model.clone())
         .unwrap_or_else(|| "omniroute/kr/auto".into());
+    let notify_settings = NotifySettings {
+        enabled: cli.notify,
+        errors_only: cli.notify_errors_only,
+        min_ms: cli.notify_min_ms,
+    };
 
     match cli.command {
         Some(Commands::Models) => cmd_models(&config, cli.json),
@@ -125,7 +142,15 @@ async fn run() -> Result<()> {
         Some(Commands::DeleteSession { id }) => cmd_delete_session(&id, cli.json)?,
         Some(Commands::Config) => cmd_config(cli.json)?,
         Some(Commands::Ask { prompt, agent }) => {
-            run_oneshot(&config, &model, &prompt, agent || cli.agent, cli.system.as_deref(), cli.raw).await?
+            run_oneshot(
+                &config,
+                &model,
+                &prompt,
+                agent || cli.agent,
+                cli.system.as_deref(),
+                cli.raw,
+                notify_settings,
+            ).await?
         }
         None => {
             // Check for piped input
@@ -138,10 +163,18 @@ async fn run() -> Result<()> {
                     std::io::stdin().read_to_string(&mut buf)?;
                     buf.trim().to_string()
                 };
-                run_oneshot(&config, &model, &prompt, cli.agent, cli.system.as_deref(), cli.raw).await?;
+                run_oneshot(
+                    &config,
+                    &model,
+                    &prompt,
+                    cli.agent,
+                    cli.system.as_deref(),
+                    cli.raw,
+                    notify_settings,
+                ).await?;
             } else {
                 // Interactive TUI
-                tui_runner::run(config, model).await?;
+                tui_runner::run(config, model, notify_settings).await?;
             }
         }
     }
@@ -514,6 +547,7 @@ async fn run_oneshot(
     agent_mode: bool,
     system: Option<&str>,
     raw: bool,
+    notify_settings: NotifySettings,
 ) -> Result<()> {
     if prompt.trim().is_empty() {
         anyhow::bail!("prompt is empty");
@@ -549,6 +583,8 @@ async fn run_oneshot(
         agent.run(&mut messages, tx).await
     });
     let mut runtime_error: Option<String> = None;
+    let mut completion_notified = false;
+    let mut last_response_ms: Option<u64> = None;
 
     // Print events to stdout
     while let Some(event) = rx.recv().await {
@@ -577,14 +613,26 @@ async fn run_oneshot(
             }
             AgentEvent::TurnDone { cost_summary, .. } => {
                 if !raw && config.cost.show {
-                    eprintln!("\n{}", style(cost_summary).dim());
+                    eprintln!("\n{}", style(&cost_summary).dim());
+                }
+                // Keep latest available response timing for notification.
+                if let Some(ms) = parse_response_ms_from_cost_summary(&cost_summary) {
+                    last_response_ms = Some(ms);
                 }
             }
             AgentEvent::Done => {
                 println!(); // final newline
+                if notify::should_notify(notify_settings, true, last_response_ms) {
+                    notify::notify_completion(true, model, last_response_ms);
+                }
+                completion_notified = true;
             }
             AgentEvent::Error(e) => {
                 runtime_error = Some(e.clone());
+                if notify::should_notify(notify_settings, false, last_response_ms) {
+                    notify::notify_completion(false, model, last_response_ms);
+                }
+                completion_notified = true;
             }
         }
     }
@@ -594,6 +642,9 @@ async fn run_oneshot(
         .context("agent task failed to join")??;
     if let Some(e) = runtime_error {
         anyhow::bail!(e);
+    }
+    if !completion_notified && notify::should_notify(notify_settings, true, last_response_ms) {
+        notify::notify_completion(true, model, last_response_ms);
     }
     Ok(())
 }
@@ -712,6 +763,22 @@ fn extract_first_json_value(input: &str) -> Option<&str> {
         }
     }
     None
+}
+
+fn parse_response_ms_from_cost_summary(summary: &str) -> Option<u64> {
+    // Optional best-effort parse for patterns like "... 123ms ...".
+    let pos = summary.find("ms")?;
+    let prefix = &summary[..pos];
+    let digits_rev: String = prefix
+        .chars()
+        .rev()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits_rev.is_empty() {
+        return None;
+    }
+    digits_rev.chars().rev().collect::<String>().parse::<u64>().ok()
 }
 
 impl ApiStyleLabel for kode_core::config::ProviderConfig {
