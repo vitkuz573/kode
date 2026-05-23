@@ -2,7 +2,7 @@ use anyhow::Result;
 use kode_core::{
     config::AgentConfig,
     cost::CostTracker,
-    types::{Message, Role},
+    types::Message,
 };
 use kode_llm::{
     client::{CompletionRequest, StreamChunk},

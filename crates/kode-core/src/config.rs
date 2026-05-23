@@ -37,7 +37,26 @@ pub struct ProviderConfig {
     /// Per-provider model overrides
     #[serde(default)]
     pub models: Vec<String>,
+    /// API wire format: "openai" (default) or "anthropic"
+    #[serde(default = "default_api_style")]
+    pub api_style: ApiStyle,
+    /// Anthropic API version header (only used when api_style = "anthropic")
+    #[serde(default = "default_anthropic_version")]
+    pub anthropic_version: String,
 }
+
+/// Wire protocol style for a provider
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiStyle {
+    /// OpenAI chat completions format (default, also used by most compatible providers)
+    OpenAI,
+    /// Native Anthropic Messages API format
+    Anthropic,
+}
+
+fn default_api_style() -> ApiStyle { ApiStyle::OpenAI }
+fn default_anthropic_version() -> String { "2023-06-01".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -140,6 +159,8 @@ impl Config {
                 api_key: "sk-c34f1467d7d44f25-82f707-08b539d2".into(),
                 name: Some("OmniRoute".into()),
                 models: vec!["kr/auto".into()],
+                api_style: ApiStyle::OpenAI,
+                anthropic_version: default_anthropic_version(),
             },
         );
         Self {

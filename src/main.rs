@@ -170,7 +170,7 @@ async fn run_oneshot(
     config: &Config,
     model: &str,
     prompt: &str,
-    agent_mode: bool,
+    _agent_mode: bool,
     system: Option<&str>,
     raw: bool,
 ) -> Result<()> {

@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use kode_core::types::{Message, Role, ToolCall};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, warn};
