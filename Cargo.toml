@@ -1,0 +1,61 @@
+[workspace]
+members = [
+    ".",
+    "crates/kode-core",
+    "crates/kode-llm",
+    "crates/kode-agent",
+    "crates/kode-tui",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.8", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+toml = "0.8"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures = "0.3"
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive", "env"] }
+ratatui = "0.27"
+crossterm = "0.27"
+tokio-stream = "0.1"
+eventsource-stream = "0.2"
+bytes = "1.6"
+indicatif = "0.17"
+console = "0.15"
+syntect = "5.2"
+similar = "2.5"
+
+[package]
+name = "kode"
+version = "0.1.0"
+edition = "2021"
+description = "kode — universal AI coding CLI with multi-model routing, TUI, and agent mode"
+license = "MIT"
+
+[[bin]]
+name = "kode"
+path = "src/main.rs"
+
+[dependencies]
+kode-core = { path = "crates/kode-core" }
+kode-llm = { path = "crates/kode-llm" }
+kode-agent = { path = "crates/kode-agent" }
+kode-tui = { path = "crates/kode-tui" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+console = { workspace = true }
+serde_json = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }

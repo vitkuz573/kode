@@ -1,0 +1,387 @@
+use anyhow::Result;
+use kode_agent::AgentEvent;
+use kode_core::{
+    config::Config,
+    session::{Session, SessionStore},
+    types::Message,
+};
+use kode_llm::ModelRouter;
+use std::sync::Arc;
+
+use crate::theme::{Theme, CATPPUCCIN_MOCHA};
+
+/// Spinner frames (braille animation)
+pub const SPINNER_FRAMES: &[&str] = &["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppMode {
+    Chat,
+    SessionList,
+    ModelPicker,
+    ThemePicker,
+    CommandPalette,
+}
+
+/// A rich rendered message in the chat view
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: MsgRole,
+    pub content: String,
+    pub reasoning: String,          // <think> content
+    pub reasoning_collapsed: bool,  // collapsed by default after done
+    pub timestamp: String,
+    pub tool_calls: Vec<ToolCallEntry>,
+    pub is_streaming: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MsgRole { User, Assistant, System }
+
+#[derive(Debug, Clone)]
+pub struct ToolCallEntry {
+    pub name: String,
+    pub status: ToolStatus,
+    pub output_preview: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolStatus { Running, Done, Error }
+
+/// A command palette entry
+#[derive(Debug, Clone)]
+pub struct Command {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+}
+
+pub fn all_commands() -> Vec<Command> {
+    vec![
+        Command { key: "Ctrl+C",     label: "quit",           description: "Exit kode" },
+        Command { key: "Ctrl+B",     label: "sidebar",        description: "Toggle session sidebar" },
+        Command { key: "Tab",        label: "sessions",       description: "Open session list" },
+        Command { key: "Ctrl+M",     label: "model",          description: "Switch model" },
+        Command { key: "Ctrl+T",     label: "theme",          description: "Switch color theme" },
+        Command { key: "Ctrl+P",     label: "palette",        description: "Command palette" },
+        Command { key: "Ctrl+N",     label: "new session",    description: "Start a new session" },
+        Command { key: "Ctrl+L",     label: "clear",          description: "Clear current chat" },
+        Command { key: "Ctrl+R",     label: "refresh models", description: "Re-discover models from provider" },
+        Command { key: "↑↓",         label: "scroll",         description: "Scroll messages" },
+        Command { key: "PgUp/PgDn",  label: "page scroll",    description: "Scroll by page" },
+        Command { key: "Home/End",   label: "cursor",         description: "Move cursor to start/end" },
+        Command { key: "Enter",      label: "send",           description: "Send message" },
+        Command { key: "Esc",        label: "back",           description: "Close overlay / cancel" },
+    ]
+}
+
+pub struct App {
+    pub mode: AppMode,
+
+    // Chat state
+    pub messages: Vec<Message>,
+    pub chat_messages: Vec<ChatMessage>,
+    pub input: String,
+    pub cursor: usize,
+    pub scroll: usize,
+    pub auto_scroll: bool,
+
+    // Thinking / streaming
+    pub thinking: bool,
+    pub spinner_frame: usize,
+    pub spinner_tick: u64,
+
+    // Model / session
+    pub model: String,
+    pub session: Session,
+    pub store: SessionStore,
+    pub router: Arc<ModelRouter>,
+    pub config: Config,
+
+    // Session list
+    pub sessions: Vec<Session>,
+    pub session_cursor: usize,
+
+    // Model picker
+    pub model_list: Vec<String>,
+    pub model_cursor: usize,
+    pub models_loading: bool,
+
+    // Theme picker
+    pub theme: Theme,
+    pub theme_list: Vec<&'static str>,
+    pub theme_cursor: usize,
+
+    // Command palette
+    pub commands: Vec<Command>,
+    pub command_cursor: usize,
+    pub command_filter: String,
+
+    // Stats
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
+    pub total_cost_usd: f64,
+    pub last_response_ms: u64,
+    pub response_start: Option<std::time::Instant>,
+
+    // Layout
+    pub sidebar_visible: bool,
+
+    // Mouse state
+    pub mouse_x: u16,
+    pub mouse_y: u16,
+}
+
+impl App {
+    pub fn new(config: Config, model: String) -> Result<Self> {
+        let router = Arc::new(ModelRouter::new(config.clone()));
+        let store = SessionStore::new()?;
+        let session = Session::new(&model);
+        let model_list = router.list_models();
+        let theme_list = Theme::all();
+        let commands = all_commands();
+        Ok(Self {
+            mode: AppMode::Chat,
+            messages: Vec::new(),
+            chat_messages: Vec::new(),
+            input: String::new(),
+            cursor: 0,
+            scroll: 0,
+            auto_scroll: true,
+            thinking: false,
+            spinner_frame: 0,
+            spinner_tick: 0,
+            model: model.clone(),
+            session,
+            store,
+            router,
+            config,
+            sessions: Vec::new(),
+            session_cursor: 0,
+            model_list,
+            model_cursor: 0,
+            models_loading: false,
+            theme: CATPPUCCIN_MOCHA,
+            theme_list,
+            theme_cursor: 0,
+            commands,
+            command_cursor: 0,
+            command_filter: String::new(),
+            total_prompt_tokens: 0,
+            total_completion_tokens: 0,
+            total_cost_usd: 0.0,
+            last_response_ms: 0,
+            response_start: None,
+            sidebar_visible: true,
+            mouse_x: 0,
+            mouse_y: 0,
+        })
+    }
+
+    pub fn tick_spinner(&mut self) {
+        if self.thinking {
+            self.spinner_tick += 1;
+            if self.spinner_tick % 2 == 0 {
+                self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+            }
+        }
+    }
+
+    pub fn spinner(&self) -> &str { SPINNER_FRAMES[self.spinner_frame] }
+
+    pub fn now_str() -> String {
+        chrono::Local::now().format("%H:%M:%S").to_string()
+    }
+
+    pub fn new_session(&mut self) {
+        self.messages.clear();
+        self.chat_messages.clear();
+        self.session = Session::new(&self.model);
+        self.scroll = 0;
+        self.auto_scroll = true;
+        self.chat_messages.push(ChatMessage {
+            role: MsgRole::System,
+            content: format!("new session · model: {}", self.model),
+            reasoning: String::new(),
+            reasoning_collapsed: true,
+            timestamp: Self::now_str(),
+            tool_calls: Vec::new(),
+            is_streaming: false,
+        });
+    }
+
+    pub fn clear_chat(&mut self) {
+        self.chat_messages.clear();
+        self.scroll = 0;
+        self.auto_scroll = true;
+    }
+
+    pub fn push_user_message(&mut self, text: &str) {
+        self.chat_messages.push(ChatMessage {
+            role: MsgRole::User,
+            content: text.to_string(),
+            reasoning: String::new(),
+            reasoning_collapsed: true,
+            timestamp: Self::now_str(),
+            tool_calls: Vec::new(),
+            is_streaming: false,
+        });
+        self.auto_scroll = true;
+    }
+
+    pub fn begin_assistant_message(&mut self) {
+        self.chat_messages.push(ChatMessage {
+            role: MsgRole::Assistant,
+            content: String::new(),
+            reasoning: String::new(),
+            reasoning_collapsed: false,
+            timestamp: Self::now_str(),
+            tool_calls: Vec::new(),
+            is_streaming: true,
+        });
+        self.response_start = Some(std::time::Instant::now());
+        self.auto_scroll = true;
+    }
+
+    pub fn append_assistant_delta(&mut self, delta: &str) {
+        if let Some(msg) = self.chat_messages.last_mut() {
+            if msg.role == MsgRole::Assistant && msg.is_streaming {
+                msg.content.push_str(delta);
+                self.auto_scroll = true;
+                return;
+            }
+        }
+        self.begin_assistant_message();
+        if let Some(msg) = self.chat_messages.last_mut() {
+            msg.content.push_str(delta);
+        }
+    }
+
+    pub fn append_reasoning_delta(&mut self, delta: &str) {
+        if let Some(msg) = self.chat_messages.last_mut() {
+            if msg.role == MsgRole::Assistant {
+                msg.reasoning.push_str(delta);
+                self.auto_scroll = true;
+                return;
+            }
+        }
+        self.begin_assistant_message();
+        if let Some(msg) = self.chat_messages.last_mut() {
+            msg.reasoning.push_str(delta);
+        }
+    }
+
+    pub fn finish_assistant_message(&mut self) {
+        if let Some(msg) = self.chat_messages.last_mut() {
+            if msg.role == MsgRole::Assistant {
+                msg.is_streaming = false;
+                // Auto-collapse reasoning when done
+                if !msg.reasoning.is_empty() {
+                    msg.reasoning_collapsed = true;
+                }
+            }
+        }
+        if let Some(start) = self.response_start.take() {
+            self.last_response_ms = start.elapsed().as_millis() as u64;
+        }
+    }
+
+    pub fn toggle_reasoning(&mut self, msg_idx: usize) {
+        if let Some(msg) = self.chat_messages.get_mut(msg_idx) {
+            msg.reasoning_collapsed = !msg.reasoning_collapsed;
+        }
+    }
+
+    pub fn add_tool_call(&mut self, name: &str) {
+        if let Some(msg) = self.chat_messages.last_mut() {
+            if msg.role == MsgRole::Assistant {
+                msg.tool_calls.push(ToolCallEntry {
+                    name: name.to_string(),
+                    status: ToolStatus::Running,
+                    output_preview: String::new(),
+                });
+                return;
+            }
+        }
+        self.begin_assistant_message();
+        if let Some(msg) = self.chat_messages.last_mut() {
+            msg.tool_calls.push(ToolCallEntry {
+                name: name.to_string(),
+                status: ToolStatus::Running,
+                output_preview: String::new(),
+            });
+        }
+    }
+
+    pub fn finish_tool_call(&mut self, name: &str, output: &str, is_error: bool) {
+        for msg in self.chat_messages.iter_mut().rev() {
+            for tc in msg.tool_calls.iter_mut().rev() {
+                if tc.name == name && tc.status == ToolStatus::Running {
+                    tc.status = if is_error { ToolStatus::Error } else { ToolStatus::Done };
+                    tc.output_preview = output
+                        .lines()
+                        .take(2)
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                        .chars()
+                        .take(80)
+                        .collect();
+                    return;
+                }
+            }
+        }
+    }
+
+    pub fn handle_agent_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::TextDelta(text) => {
+                self.append_assistant_delta(&text);
+            }
+            AgentEvent::ReasoningDelta(text) => {
+                self.append_reasoning_delta(&text);
+            }
+            AgentEvent::ToolCallStart { name, .. } => {
+                self.add_tool_call(&name);
+            }
+            AgentEvent::ToolCallDone { name, output, is_error, .. } => {
+                self.finish_tool_call(&name, &output, is_error);
+            }
+            AgentEvent::TurnDone { prompt_tokens, completion_tokens, .. } => {
+                self.total_prompt_tokens += prompt_tokens;
+                self.total_completion_tokens += completion_tokens;
+                self.total_cost_usd += (prompt_tokens as f64 / 1_000_000.0) * 1.0
+                    + (completion_tokens as f64 / 1_000_000.0) * 3.0;
+                self.thinking = false;
+                self.finish_assistant_message();
+                let _ = self.store.save(&self.session);
+            }
+            AgentEvent::Done => {
+                self.thinking = false;
+                self.finish_assistant_message();
+                let _ = self.store.save(&self.session);
+            }
+            AgentEvent::Error(e) => {
+                self.thinking = false;
+                self.finish_assistant_message();
+                self.chat_messages.push(ChatMessage {
+                    role: MsgRole::System,
+                    content: format!("⚠ error: {}", e),
+                    reasoning: String::new(),
+                    reasoning_collapsed: true,
+                    timestamp: Self::now_str(),
+                    tool_calls: Vec::new(),
+                    is_streaming: false,
+                });
+            }
+        }
+    }
+
+    pub fn filtered_commands(&self) -> Vec<&Command> {
+        let f = self.command_filter.to_lowercase();
+        self.commands.iter().filter(|c| {
+            f.is_empty()
+                || c.label.contains(&f)
+                || c.description.to_lowercase().contains(&f)
+                || c.key.to_lowercase().contains(&f)
+        }).collect()
+    }
+}
