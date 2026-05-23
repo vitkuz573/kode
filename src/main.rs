@@ -8,7 +8,7 @@ use kode_agent::{
 };
 use kode_core::{
     config::Config,
-    session::SessionStore,
+    session::{Session, SessionStore, TodoItem},
     types::Message,
 };
 use kode_llm::ModelRouter;
@@ -561,6 +561,9 @@ async fn run_oneshot(
     };
 
     let mut messages: Vec<Message> = Vec::new();
+    let mut session = Session::new(model.to_string());
+    let store = SessionStore::new()?;
+    let mut assistant_text = String::new();
 
     // System prompt
     let sys = system
@@ -569,6 +572,8 @@ async fn run_oneshot(
         .unwrap_or_else(|| "You are kode, a helpful AI coding assistant.".into());
     messages.push(Message::system(sys));
     messages.push(Message::user(prompt));
+    session.push(Message::user(prompt));
+    let _ = store.save(&session);
 
     let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
 
@@ -598,18 +603,28 @@ async fn run_oneshot(
             AgentEvent::TextDelta(text) => {
                 print!("{}", text);
                 std::io::stdout().flush().ok();
+                assistant_text.push_str(&text);
             }
-            AgentEvent::ToolCallStart { name, .. } => {
+            AgentEvent::ToolCallStart { name, arguments, .. } => {
                 if !raw {
                     eprintln!("\n{} {}", style("⚙").yellow(), style(format!("calling: {}", name)).dim());
                 }
+                if name == "write_file" {
+                    if let Some(path) = arguments.get("path").and_then(|v| v.as_str()) {
+                        let path = path.trim();
+                        if !path.is_empty() && !session.changed_files.iter().any(|p| p == path) {
+                            session.changed_files.push(path.to_string());
+                        }
+                    }
+                }
             }
-            AgentEvent::ToolCallDone { name, output, is_error, .. } => {
+            AgentEvent::ToolCallDone { id, name, output, is_error } => {
                 if !raw {
                     let icon = if is_error { style("✗").red() } else { style("✓").green() };
                     let preview: String = output.lines().take(2).collect::<Vec<_>>().join(" | ");
                     eprintln!("{} {}: {}", icon, style(&name).dim(), style(preview).dim());
                 }
+                session.push(Message::tool_result(id, output));
             }
             AgentEvent::TurnDone { cost_summary, .. } => {
                 if !raw && config.cost.show {
@@ -622,6 +637,11 @@ async fn run_oneshot(
             }
             AgentEvent::Done => {
                 println!(); // final newline
+                if !assistant_text.trim().is_empty() {
+                    session.push(Message::assistant(assistant_text.clone()));
+                    merge_todos_from_markdown(&mut session.todo_items, &assistant_text);
+                }
+                let _ = store.save(&session);
                 if notify::should_notify(notify_settings, true, last_response_ms) {
                     notify::notify_completion(true, model, last_response_ms);
                 }
@@ -629,6 +649,11 @@ async fn run_oneshot(
             }
             AgentEvent::Error(e) => {
                 runtime_error = Some(e.clone());
+                if !assistant_text.trim().is_empty() {
+                    session.push(Message::assistant(assistant_text.clone()));
+                    merge_todos_from_markdown(&mut session.todo_items, &assistant_text);
+                }
+                let _ = store.save(&session);
                 if notify::should_notify(notify_settings, false, last_response_ms) {
                     notify::notify_completion(false, model, last_response_ms);
                 }
@@ -647,6 +672,47 @@ async fn run_oneshot(
         notify::notify_completion(true, model, last_response_ms);
     }
     Ok(())
+}
+
+fn merge_todos_from_markdown(target: &mut Vec<TodoItem>, text: &str) {
+    for (done, todo_text) in parse_markdown_todos(text) {
+        if let Some(existing) = target
+            .iter_mut()
+            .find(|t| t.text.eq_ignore_ascii_case(&todo_text))
+        {
+            existing.done = done;
+            continue;
+        }
+        target.push(TodoItem { text: todo_text, done });
+    }
+}
+
+fn parse_markdown_todos(text: &str) -> Vec<(bool, String)> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        let (done, payload) = if let Some(s) = line.strip_prefix("- [ ] ") {
+            (false, s)
+        } else if let Some(s) = line.strip_prefix("* [ ] ") {
+            (false, s)
+        } else if let Some(s) = line.strip_prefix("- [x] ") {
+            (true, s)
+        } else if let Some(s) = line.strip_prefix("- [X] ") {
+            (true, s)
+        } else if let Some(s) = line.strip_prefix("* [x] ") {
+            (true, s)
+        } else if let Some(s) = line.strip_prefix("* [X] ") {
+            (true, s)
+        } else {
+            continue;
+        };
+        let todo_text = payload.trim();
+        if todo_text.is_empty() {
+            continue;
+        }
+        out.push((done, todo_text.to_string()));
+    }
+    out
 }
 
 trait ApiStyleLabel {

@@ -534,34 +534,12 @@ impl App {
             .map(|t| t.text.to_lowercase())
             .collect();
 
-        for raw in text.lines() {
-            let line = raw.trim();
-            let (done, payload) = if let Some(s) = line.strip_prefix("- [ ] ") {
-                (false, s)
-            } else if let Some(s) = line.strip_prefix("* [ ] ") {
-                (false, s)
-            } else if let Some(s) = line.strip_prefix("- [x] ") {
-                (true, s)
-            } else if let Some(s) = line.strip_prefix("- [X] ") {
-                (true, s)
-            } else if let Some(s) = line.strip_prefix("* [x] ") {
-                (true, s)
-            } else if let Some(s) = line.strip_prefix("* [X] ") {
-                (true, s)
-            } else {
-                continue;
-            };
-
-            let todo_text = payload.trim();
-            if todo_text.is_empty() {
-                continue;
-            }
-
+        for (done, todo_text) in parse_markdown_todos(text) {
             if let Some(existing_item) = self
                 .session
                 .todo_items
                 .iter_mut()
-                .find(|t| t.text.eq_ignore_ascii_case(todo_text))
+                .find(|t| t.text.eq_ignore_ascii_case(&todo_text))
             {
                 existing_item.done = done;
                 continue;
@@ -569,7 +547,7 @@ impl App {
 
             if existing.insert(todo_text.to_lowercase()) {
                 self.session.todo_items.push(TodoItem {
-                    text: todo_text.to_string(),
+                    text: todo_text,
                     done,
                 });
             }
@@ -712,9 +690,37 @@ fn extract_first_json_value(input: &str) -> Option<&str> {
     None
 }
 
+fn parse_markdown_todos(text: &str) -> Vec<(bool, String)> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        let (done, payload) = if let Some(s) = line.strip_prefix("- [ ] ") {
+            (false, s)
+        } else if let Some(s) = line.strip_prefix("* [ ] ") {
+            (false, s)
+        } else if let Some(s) = line.strip_prefix("- [x] ") {
+            (true, s)
+        } else if let Some(s) = line.strip_prefix("- [X] ") {
+            (true, s)
+        } else if let Some(s) = line.strip_prefix("* [x] ") {
+            (true, s)
+        } else if let Some(s) = line.strip_prefix("* [X] ") {
+            (true, s)
+        } else {
+            continue;
+        };
+        let todo_text = payload.trim();
+        if todo_text.is_empty() {
+            continue;
+        }
+        out.push((done, todo_text.to_string()));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_error_payload;
+    use super::{format_error_payload, parse_markdown_todos};
 
     #[test]
     fn formats_plain_json_error() {
@@ -730,5 +736,15 @@ mod tests {
         let out = format_error_payload(raw);
         assert!(out.contains("\"code\": \"invalid_api_key\""));
         assert!(!out.contains("API stream error 401 Unauthorized"));
+    }
+
+    #[test]
+    fn parses_markdown_todos() {
+        let text = "Plan:\n- [ ] Implement SQLite session store\n- [x] Wire up notifications\n* [ ] Add integration tests\n";
+        let todos = parse_markdown_todos(text);
+        assert_eq!(todos.len(), 3);
+        assert_eq!(todos[0], (false, "Implement SQLite session store".to_string()));
+        assert_eq!(todos[1], (true, "Wire up notifications".to_string()));
+        assert_eq!(todos[2], (false, "Add integration tests".to_string()));
     }
 }
