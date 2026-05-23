@@ -44,6 +44,61 @@ kode --prompt "list files and summarize the project" --agent
 kode models          # list configured models
 kode sessions        # list saved sessions
 kode config          # show config path
+
+# Machine-readable output for automation
+kode models --json
+kode sessions --json
+kode config --json
+```
+
+## Offline Mock Provider (No Real API Limits)
+
+Run local mock server:
+
+```bash
+cargo run --bin mock_provider
+# listens on http://127.0.0.1:8787
+```
+
+Configure providers in `~/.config/kode/config.toml`:
+
+```toml
+[providers.mock_openai]
+base_url = "http://127.0.0.1:8787/v1"
+api_key = "mock-key"
+api_style = "openai"
+models = ["gpt-4o-mini", "gpt-4o"]
+
+[providers.mock_anthropic]
+base_url = "http://127.0.0.1:8787"
+api_key = "mock-key"
+api_style = "anthropic"
+anthropic_version = "2023-06-01"
+models = ["claude-sonnet-4-5"]
+```
+
+Use it in CLI:
+
+```bash
+kode --model mock_openai/gpt-4o-mini --prompt "hello"
+kode --model mock_anthropic/claude-sonnet-4-5 --prompt "hello"
+```
+
+Error scenarios (no real provider access required):
+
+```bash
+# Global scenario for all requests
+KODE_MOCK_SCENARIO=auth_error cargo run --bin mock_provider
+
+# Other scenarios:
+# ok | auth_error | rate_limit | server_error | malformed_json | timeout
+```
+
+Optional envs:
+
+```bash
+KODE_MOCK_BIND=127.0.0.1:8787
+KODE_MOCK_TIMEOUT_MS=15000
 ```
 
 ## TUI Keybindings
@@ -61,6 +116,14 @@ kode config          # show config path
 | `Tab` | Session list |
 | `↑↓ / PgUp/PgDn` | Scroll messages |
 | `Ctrl+C` | Quit |
+
+## Exit Codes
+
+- `0` — success
+- `1` — generic runtime error
+- `2` — input/validation error (for example empty prompt, unknown session prefix)
+- `3` — configuration error (config path/read/parse)
+- `4` — network/provider connectivity/timeout error
 
 ## Configuration
 

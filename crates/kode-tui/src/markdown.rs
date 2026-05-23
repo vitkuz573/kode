@@ -52,7 +52,9 @@ pub fn render_with_theme(text: &str, max_width: usize, t: &Theme) -> Vec<Line<'s
                 } else if raw.is_empty() {
                     lines.push(Line::from(""));
                 } else {
-                    lines.push(inline_line(raw, t));
+                    for wrapped in wrap_hard(raw, max_width.max(1)) {
+                        lines.push(inline_line(&wrapped, t));
+                    }
                 }
             }
         }
@@ -98,10 +100,12 @@ fn flush_code_block(
     lines.push(Line::from(Span::styled(top, Style::default().fg(t.surface1))));
 
     for l in code {
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(t.surface1)),
-            Span::styled(l.clone(), Style::default().fg(t.green)),
-        ]));
+        for wrapped in wrap_hard(l, max_width.saturating_sub(4).max(1)) {
+            lines.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(t.surface1)),
+                Span::styled(wrapped, Style::default().fg(t.green)),
+            ]));
+        }
     }
 
     let bottom = format!("╰{}╯", "─".repeat((max_width.saturating_sub(2)).min(62)));
@@ -173,4 +177,28 @@ fn inline_line(text: &str, t: &Theme) -> Line<'static> {
     }
 
     Line::from(spans)
+}
+
+fn wrap_hard(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+
+    for ch in text.chars() {
+        if cur_w >= max_width {
+            out.push(cur);
+            cur = String::new();
+            cur_w = 0;
+        }
+        cur.push(ch);
+        cur_w += 1;
+    }
+
+    if !cur.is_empty() || out.is_empty() {
+        out.push(cur);
+    }
+    out
 }

@@ -69,6 +69,7 @@ pub fn all_commands() -> Vec<Command> {
         Command { key: "↑↓",         label: "scroll",         description: "Scroll messages" },
         Command { key: "PgUp/PgDn",  label: "page scroll",    description: "Scroll by page" },
         Command { key: "Home/End",   label: "cursor",         description: "Move cursor to start/end" },
+        Command { key: "Shift+Enter",label: "newline",        description: "Insert a new line in input" },
         Command { key: "Enter",      label: "send",           description: "Send message" },
         Command { key: "Esc",        label: "back",           description: "Close overlay / cancel" },
     ]
@@ -362,9 +363,10 @@ impl App {
             AgentEvent::Error(e) => {
                 self.thinking = false;
                 self.finish_assistant_message();
+                let formatted = format_error_payload(&e);
                 self.chat_messages.push(ChatMessage {
                     role: MsgRole::System,
-                    content: format!("⚠ error: {}", e),
+                    content: format!("⚠ error:\n{}", formatted),
                     reasoning: String::new(),
                     reasoning_collapsed: true,
                     timestamp: Self::now_str(),
@@ -383,5 +385,101 @@ impl App {
                 || c.description.to_lowercase().contains(&f)
                 || c.key.to_lowercase().contains(&f)
         }).collect()
+    }
+}
+
+fn format_error_payload(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(pretty) = try_pretty_json(trimmed) {
+        return pretty;
+    }
+    if let Some(json_slice) = extract_first_json_value(trimmed) {
+        if let Some(pretty) = try_pretty_json(json_slice) {
+            return pretty;
+        }
+    }
+    raw.to_string()
+}
+
+fn try_pretty_json(input: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(input).ok()?;
+    serde_json::to_string_pretty(&parsed).ok()
+}
+
+fn extract_first_json_value(input: &str) -> Option<&str> {
+    let bytes = input.as_bytes();
+    let mut start = None;
+    let mut stack: Vec<u8> = Vec::new();
+    let mut in_str = false;
+    let mut escaped = false;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+
+        if b == b'"' {
+            in_str = true;
+            continue;
+        }
+
+        if start.is_none() {
+            if b == b'{' || b == b'[' {
+                start = Some(i);
+                stack.push(b);
+            }
+            continue;
+        }
+
+        match b {
+            b'{' | b'[' => stack.push(b),
+            b'}' => {
+                if !matches!(stack.last(), Some(b'{')) {
+                    return None;
+                }
+                stack.pop();
+            }
+            b']' => {
+                if !matches!(stack.last(), Some(b'[')) {
+                    return None;
+                }
+                stack.pop();
+            }
+            _ => {}
+        }
+
+        if stack.is_empty() {
+            let s = start?;
+            return input.get(s..=i);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_error_payload;
+
+    #[test]
+    fn formats_plain_json_error() {
+        let raw = r#"{"error":{"message":"bad key","type":"invalid_request_error"}}"#;
+        let out = format_error_payload(raw);
+        assert!(out.contains("\n"));
+        assert!(out.contains("\"message\": \"bad key\""));
+    }
+
+    #[test]
+    fn formats_embedded_json_error() {
+        let raw = r#"API stream error 401 Unauthorized: {"error":{"message":"no auth","code":"invalid_api_key"}}"#;
+        let out = format_error_payload(raw);
+        assert!(out.contains("\"code\": \"invalid_api_key\""));
+        assert!(!out.contains("API stream error 401 Unauthorized"));
     }
 }

@@ -93,6 +93,11 @@ fn handle_chat_key(app: &mut App, key: KeyEvent) -> InputAction {
         }
 
         // ── Send ──
+        (KeyModifiers::SHIFT, KeyCode::Enter) => {
+            let b = char_to_byte(&app.input, app.cursor);
+            app.input.insert(b, '\n');
+            app.cursor += 1;
+        }
         (_, KeyCode::Enter) => {
             if app.thinking || app.input.trim().is_empty() { return InputAction::None; }
             let text = app.input.trim().to_string();
@@ -146,6 +151,12 @@ fn handle_session_key(app: &mut App, key: KeyEvent) -> InputAction {
         KeyCode::Down => {
             if app.session_cursor + 1 < app.sessions.len() { app.session_cursor += 1; }
         }
+        KeyCode::PageUp => {
+            app.session_cursor = app.session_cursor.saturating_sub(10);
+        }
+        KeyCode::PageDown => {
+            app.session_cursor = (app.session_cursor + 10).min(app.sessions.len().saturating_sub(1));
+        }
         KeyCode::Enter => {
             if let Some(s) = app.sessions.get(app.session_cursor) {
                 app.messages = s.messages.clone();
@@ -190,6 +201,12 @@ fn handle_model_key(app: &mut App, key: KeyEvent) -> InputAction {
         (_, KeyCode::Down) => {
             if app.model_cursor + 1 < app.model_list.len() { app.model_cursor += 1; }
         }
+        (_, KeyCode::PageUp) => {
+            app.model_cursor = app.model_cursor.saturating_sub(10);
+        }
+        (_, KeyCode::PageDown) => {
+            app.model_cursor = (app.model_cursor + 10).min(app.model_list.len().saturating_sub(1));
+        }
         (_, KeyCode::Enter) => {
             if let Some(m) = app.model_list.get(app.model_cursor) {
                 app.model = m.clone();
@@ -213,6 +230,12 @@ fn handle_theme_key(app: &mut App, key: KeyEvent) -> InputAction {
         KeyCode::Up => { app.theme_cursor = app.theme_cursor.saturating_sub(1); }
         KeyCode::Down => {
             if app.theme_cursor + 1 < app.theme_list.len() { app.theme_cursor += 1; }
+        }
+        KeyCode::PageUp => {
+            app.theme_cursor = app.theme_cursor.saturating_sub(10);
+        }
+        KeyCode::PageDown => {
+            app.theme_cursor = (app.theme_cursor + 10).min(app.theme_list.len().saturating_sub(1));
         }
         KeyCode::Enter => {
             if let Some(name) = app.theme_list.get(app.theme_cursor) {

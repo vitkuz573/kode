@@ -257,8 +257,6 @@ impl LlmClient for AnthropicClient {
         let mut completion_tokens = 0u64;
         let mut finish_reason = String::new();
 
-        // Track current block type for delta routing
-        let mut current_block_type = String::new();
         // index -> (id, name, args) for tool_use blocks
         let mut tool_blocks: std::collections::BTreeMap<usize, (String, String, String)> =
             std::collections::BTreeMap::new();
@@ -290,7 +288,6 @@ impl LlmClient for AnthropicClient {
                     Ok(ev) => match ev.event_type.as_str() {
                         "content_block_start" => {
                             if let Some(block) = ev.content_block {
-                                current_block_type = block.block_type.clone();
                                 let idx = ev.index.unwrap_or(0);
                                 if block.block_type == "tool_use" {
                                     tool_blocks.insert(

@@ -43,7 +43,6 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn draw_chat(f: &mut Frame, app: &App) {
     let area = f.size();
-    let t = &app.theme;
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -92,6 +91,13 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
             format!(" {} ", t.name),
             Style::default().fg(t.overlay0).bg(t.mantle),
         ),
+        Span::styled(
+            if app.auto_scroll { " follow " } else { " paused " },
+            Style::default()
+                .fg(t.base)
+                .bg(if app.auto_scroll { t.green } else { t.yellow })
+                .add_modifier(Modifier::BOLD),
+        ),
     ];
 
     if app.thinking {
@@ -113,7 +119,7 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    let keybinds = " ^P palette  ^B sidebar  Tab sessions  ^M model  ^T theme  ^C quit ";
+    let keybinds = " ^P palette  ^B sidebar  Tab sessions  ^M model  ^T theme  ⇧Enter newline  ^C quit ";
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let pad = (area.width as usize).saturating_sub(used + keybinds.chars().count());
     spans.push(Span::styled(
@@ -133,7 +139,8 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let model_part = format!(" {} ", app.model);
+    let model_part = format!(" {} ", truncate(&app.model, 42));
+    let mode_part = if app.thinking { " running " } else { " idle " };
     let stats = format!(
         " ↑{} ↓{}  ${:.5}  {}ms  {} msgs ",
         app.total_prompt_tokens,
@@ -143,12 +150,19 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         app.chat_messages.len(),
     );
     let pad = (area.width as usize)
-        .saturating_sub(model_part.chars().count() + stats.chars().count());
+        .saturating_sub(model_part.chars().count() + mode_part.chars().count() + stats.chars().count());
 
     let line = Line::from(vec![
         Span::styled(
             &model_part,
             Style::default().fg(t.base).bg(t.blue).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            mode_part,
+            Style::default()
+                .fg(t.base)
+                .bg(if app.thinking { t.yellow } else { t.green })
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ".repeat(pad), Style::default().bg(t.crust)),
         Span::styled(&stats, Style::default().fg(t.overlay1).bg(t.crust)),
@@ -242,7 +256,10 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(t.base));
 
     f.render_widget(
-        Paragraph::new(visible).block(block).style(Style::default().bg(t.base)),
+        Paragraph::new(visible)
+            .block(block)
+            .style(Style::default().bg(t.base))
+            .wrap(Wrap { trim: false }),
         area,
     );
 
@@ -262,7 +279,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let (border_color, title) = if app.thinking {
         (t.yellow, format!(" {} thinking… ", app.spinner()))
     } else {
-        (t.accent, " message — Enter: send  ↑↓: scroll  ^P: palette ".to_string())
+        (t.accent, " message  Enter send  Shift+Enter newline  ↑↓ scroll  ^P palette ".to_string())
     };
 
     let block = Block::default()
@@ -271,10 +288,21 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .title(Span::styled(&title, Style::default().fg(border_color)))
         .style(Style::default().bg(t.mantle));
 
+    let input_value = if app.input.is_empty() && !app.thinking {
+        "Type a request…".to_string()
+    } else {
+        app.input.clone()
+    };
+    let input_style = if app.input.is_empty() && !app.thinking {
+        Style::default().fg(t.overlay0).bg(t.mantle)
+    } else {
+        Style::default().fg(t.text).bg(t.mantle)
+    };
+
     f.render_widget(
-        Paragraph::new(app.input.as_str())
+        Paragraph::new(input_value)
             .block(block)
-            .style(Style::default().fg(t.text).bg(t.mantle))
+            .style(input_style)
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -293,10 +321,14 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 fn render_message(out: &mut Vec<Line<'static>>, msg: &ChatMessage, width: usize, t: &Theme) {
     match msg.role {
         MsgRole::System => {
-            out.push(Line::from(vec![
-                Span::styled("  ◆ ", Style::default().fg(t.overlay0)),
-                Span::styled(msg.content.clone(), Style::default().fg(t.overlay0)),
-            ]));
+            let lines = wrap_preserve_layout(&msg.content, width.saturating_sub(6).max(6));
+            for (i, line) in lines.into_iter().enumerate() {
+                let prefix = if i == 0 { "  ◆ " } else { "    " };
+                out.push(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(t.overlay0)),
+                    Span::styled(line, Style::default().fg(t.overlay0)),
+                ]));
+            }
             out.push(Line::from(""));
         }
         MsgRole::User => {
@@ -395,10 +427,12 @@ fn render_thinking_block(out: &mut Vec<Line<'static>>, msg: &ChatMessage, width:
         ]));
 
         for line in msg.reasoning.lines().take(50) {
-            out.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(t.sapphire)),
-                Span::styled(line.to_string(), Style::default().fg(t.subtext0)),
-            ]));
+            for wrapped in wrap_text(line, width.saturating_sub(8).max(8)) {
+                out.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(t.sapphire)),
+                    Span::styled(wrapped, Style::default().fg(t.subtext0)),
+                ]));
+            }
         }
         if line_count > 50 {
             out.push(Line::from(vec![
@@ -438,13 +472,12 @@ fn render_tool_call(out: &mut Vec<Line<'static>>, tc: &crate::app::ToolCallEntry
     ]));
 
     if !tc.output_preview.is_empty() {
-        out.push(Line::from(vec![
-            Span::styled("  │  ", Style::default().fg(t.surface1)),
-            Span::styled(
-                truncate(&tc.output_preview, width.saturating_sub(8)),
-                Style::default().fg(t.overlay1),
-            ),
-        ]));
+        for line in wrap_text(&tc.output_preview, width.saturating_sub(8).max(8)) {
+            out.push(Line::from(vec![
+                Span::styled("  │  ", Style::default().fg(t.surface1)),
+                Span::styled(line, Style::default().fg(t.overlay1)),
+            ]));
+        }
     }
 
     out.push(Line::from(Span::styled("  ╰─", Style::default().fg(t.surface1))));
@@ -596,25 +629,31 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
 
     // Commands list
     let cmds = app.filtered_commands();
-    let items: Vec<ListItem> = cmds.iter().enumerate().map(|(i, cmd)| {
-        let sel = i == app.command_cursor;
-        let bg = if sel { t.surface0 } else { t.mantle };
-        ListItem::new(Line::from(vec![
-            Span::styled(
-                format!(" {:12} ", cmd.key),
-                Style::default().fg(t.sapphire).bg(bg).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:16} ", cmd.label),
-                Style::default().fg(if sel { t.accent2 } else { t.text }).bg(bg)
-                    .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
-            ),
-            Span::styled(
-                cmd.description,
-                Style::default().fg(t.overlay1).bg(bg),
-            ),
-        ]))
-    }).collect();
+    let items: Vec<ListItem> = if cmds.is_empty() {
+        vec![ListItem::new(Line::from(vec![
+            Span::styled("  no commands found", Style::default().fg(t.overlay0)),
+        ]))]
+    } else {
+        cmds.iter().enumerate().map(|(i, cmd)| {
+            let sel = i == app.command_cursor;
+            let bg = if sel { t.surface0 } else { t.mantle };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" {:12} ", cmd.key),
+                    Style::default().fg(t.sapphire).bg(bg).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:16} ", cmd.label),
+                    Style::default().fg(if sel { t.accent2 } else { t.text }).bg(bg)
+                        .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                ),
+                Span::styled(
+                    truncate(cmd.description, 64),
+                    Style::default().fg(t.overlay1).bg(bg),
+                ),
+            ]))
+        }).collect()
+    };
 
     let list_block = Block::default()
         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
@@ -634,17 +673,28 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
         let mut current = String::new();
         let mut current_width = 0usize;
         for word in raw_line.split_whitespace() {
-            let word_w = word.chars().count();
+            let mut word_rest = word.to_string();
+            while word_rest.chars().count() > max_width {
+                let chunk: String = word_rest.chars().take(max_width).collect();
+                if current_width > 0 {
+                    result.push(current.clone());
+                    current.clear();
+                    current_width = 0;
+                }
+                result.push(chunk.clone());
+                word_rest = word_rest.chars().skip(max_width).collect();
+            }
+            let word_w = word_rest.chars().count();
             if current_width == 0 {
-                current.push_str(word);
+                current.push_str(&word_rest);
                 current_width = word_w;
             } else if current_width + 1 + word_w <= max_width {
                 current.push(' ');
-                current.push_str(word);
+                current.push_str(&word_rest);
                 current_width += 1 + word_w;
             } else {
                 result.push(current.clone());
-                current = word.to_string();
+                current = word_rest;
                 current_width = word_w;
             }
         }
@@ -664,6 +714,28 @@ fn truncate(s: &str, max: usize) -> String {
     let mut t: String = chars[..max.saturating_sub(1)].iter().collect();
     t.push('…');
     t
+}
+
+fn wrap_preserve_layout(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut out = Vec::new();
+    for raw_line in text.split('\n') {
+        if raw_line.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut start = 0usize;
+        let chars: Vec<char> = raw_line.chars().collect();
+        while start < chars.len() {
+            let end = (start + max_width).min(chars.len());
+            out.push(chars[start..end].iter().collect());
+            start = end;
+        }
+    }
+    out
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
