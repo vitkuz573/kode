@@ -36,6 +36,14 @@ pub fn draw(f: &mut Frame, app: &App) {
             draw_chat(f, app);
             draw_command_palette(f, app);
         }
+        AppMode::TodoManager => {
+            draw_chat(f, app);
+            draw_todo_overlay(f, app);
+        }
+        AppMode::ChangedFilesManager => {
+            draw_chat(f, app);
+            draw_changed_files_overlay(f, app);
+        }
     }
 }
 
@@ -119,7 +127,7 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    let keybinds = " ^P palette  ^B sidebar  Tab sessions  ^K model  ^T theme  ⇧Enter newline  ^C quit ";
+    let keybinds = " ^P palette  ^B sidebar  Tab sessions  ^K model  ^T theme  ^Y todo  ^F files  ⇧Enter newline  ^C quit ";
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let pad = (area.width as usize).saturating_sub(used + keybinds.chars().count());
     spans.push(Span::styled(
@@ -175,6 +183,15 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
+    let sidebar_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(8),
+            Constraint::Length(10),
+            Constraint::Length(10),
+        ])
+        .split(area);
+
     let sessions = &app.sessions;
     let items: Vec<ListItem> = if sessions.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -206,12 +223,85 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let block = Block::default()
-        .borders(Borders::RIGHT)
+        .borders(Borders::RIGHT | Borders::BOTTOM)
         .border_style(Style::default().fg(t.surface0))
         .title(Span::styled(" sessions ", Style::default().fg(t.overlay1)))
         .style(Style::default().bg(t.mantle));
 
-    f.render_widget(List::new(items).block(block), area);
+    f.render_widget(List::new(items).block(block), sidebar_chunks[0]);
+    draw_changed_files_panel(f, app, sidebar_chunks[1]);
+    draw_todo_panel(f, app, sidebar_chunks[2]);
+}
+
+fn draw_changed_files_panel(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let mut lines: Vec<Line> = Vec::new();
+    if app.session.changed_files.is_empty() {
+        lines.push(Line::from(Span::styled("  none", Style::default().fg(t.overlay0))));
+    } else {
+        for p in app.session.changed_files.iter().rev().take(4) {
+            lines.push(Line::from(vec![
+                Span::styled("  • ", Style::default().fg(t.sapphire)),
+                Span::styled(truncate(p, area.width.saturating_sub(6) as usize), Style::default().fg(t.subtext1)),
+            ]));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::RIGHT | Borders::BOTTOM)
+        .border_style(Style::default().fg(t.surface0))
+        .title(Span::styled(
+            format!(" changed files ({}) ", app.session.changed_files.len()),
+            Style::default().fg(t.overlay1),
+        ))
+        .style(Style::default().bg(t.mantle));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .style(Style::default().bg(t.mantle))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_todo_panel(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let done = app.session.todo_items.iter().filter(|x| x.done).count();
+    let mut lines: Vec<Line> = Vec::new();
+
+    if app.session.todo_items.is_empty() {
+        lines.push(Line::from(Span::styled("  none", Style::default().fg(t.overlay0))));
+    } else {
+        for item in app.session.todo_items.iter().take(4) {
+            let marker = if item.done { "[x]" } else { "[ ]" };
+            let color = if item.done { t.green } else { t.yellow };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", marker), Style::default().fg(color)),
+                Span::styled(
+                    truncate(&item.text, area.width.saturating_sub(8) as usize),
+                    Style::default().fg(t.subtext1),
+                ),
+            ]));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(Style::default().fg(t.surface0))
+        .title(Span::styled(
+            format!(" todo ({}/{}) ", done, app.session.todo_items.len()),
+            Style::default().fg(t.overlay1),
+        ))
+        .style(Style::default().bg(t.mantle));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .style(Style::default().bg(t.mantle))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -661,6 +751,151 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
         .style(Style::default().bg(t.mantle));
 
     f.render_widget(List::new(items).block(list_block), inner[1]);
+}
+
+fn draw_todo_overlay(f: &mut Frame, app: &App) {
+    let t = &app.theme;
+    let area = centered_rect(60, 60, f.size());
+    f.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(area);
+
+    let items: Vec<ListItem> = if app.session.todo_items.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  no todo items",
+            Style::default().fg(t.overlay0),
+        )))]
+    } else {
+        app.session
+            .todo_items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let sel = i == app.todo_cursor;
+                let bg = if sel { t.surface0 } else { t.mantle };
+                let marker = if item.done { "[x]" } else { "[ ]" };
+                let marker_color = if item.done { t.green } else { t.yellow };
+                ListItem::new(Line::from(vec![
+                    Span::styled(if sel { " ▶ " } else { "   " }, Style::default().fg(t.accent).bg(bg)),
+                    Span::styled(marker, Style::default().fg(marker_color).bg(bg)),
+                    Span::styled(" ", Style::default().bg(bg)),
+                    Span::styled(
+                        truncate(&item.text, area.width.saturating_sub(12) as usize),
+                        Style::default()
+                            .fg(if sel { t.accent2 } else { t.text })
+                            .bg(bg)
+                            .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.yellow))
+        .title(Span::styled(
+            " todo manager  ↑↓ select  Space/Enter toggle  d delete  type + Enter add  Esc back ",
+            Style::default().fg(t.yellow).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(t.mantle));
+
+    f.render_widget(List::new(items).block(list_block), chunks[0]);
+
+    let input = if app.todo_input.is_empty() {
+        " add todo item...".to_string()
+    } else {
+        format!(" {}", app.todo_input)
+    };
+    let input_style = if app.todo_input.is_empty() {
+        Style::default().fg(t.overlay0).bg(t.mantle)
+    } else {
+        Style::default().fg(t.text).bg(t.mantle)
+    };
+    let input_block = Block::default()
+        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+        .border_style(Style::default().fg(t.yellow))
+        .style(Style::default().bg(t.mantle));
+    f.render_widget(
+        Paragraph::new(input)
+            .block(input_block)
+            .style(input_style)
+            .wrap(Wrap { trim: false }),
+        chunks[1],
+    );
+}
+
+fn draw_changed_files_overlay(f: &mut Frame, app: &App) {
+    let t = &app.theme;
+    let area = centered_rect(68, 62, f.size());
+    f.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(area);
+
+    let files = app.filtered_changed_files();
+    let items: Vec<ListItem> = if files.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  no changed files (or filter has no matches)",
+            Style::default().fg(t.overlay0),
+        )))]
+    } else {
+        files
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let sel = i == app.changed_files_cursor;
+                let bg = if sel { t.surface0 } else { t.mantle };
+                ListItem::new(Line::from(vec![
+                    Span::styled(if sel { " ▶ " } else { "   " }, Style::default().fg(t.accent).bg(bg)),
+                    Span::styled(
+                        truncate(p, area.width.saturating_sub(10) as usize),
+                        Style::default()
+                            .fg(if sel { t.accent2 } else { t.text })
+                            .bg(bg)
+                            .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.sapphire))
+        .title(Span::styled(
+            " changed files  ↑↓ select  Enter insert path  d delete  type filter  Esc back ",
+            Style::default().fg(t.sapphire).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(t.mantle));
+    f.render_widget(List::new(items).block(list_block), chunks[0]);
+
+    let filter_text = if app.changed_files_filter.is_empty() {
+        " filter...".to_string()
+    } else {
+        format!(" {}", app.changed_files_filter)
+    };
+    let filter_style = if app.changed_files_filter.is_empty() {
+        Style::default().fg(t.overlay0).bg(t.mantle)
+    } else {
+        Style::default().fg(t.text).bg(t.mantle)
+    };
+    let filter_block = Block::default()
+        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+        .border_style(Style::default().fg(t.sapphire))
+        .style(Style::default().bg(t.mantle));
+    f.render_widget(
+        Paragraph::new(filter_text)
+            .block(filter_block)
+            .style(filter_style)
+            .wrap(Wrap { trim: false }),
+        chunks[1],
+    );
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

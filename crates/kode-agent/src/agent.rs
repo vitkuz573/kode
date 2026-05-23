@@ -22,7 +22,7 @@ pub enum AgentEvent {
     /// Reasoning/thinking delta (DeepSeek, QwQ, o1-style)
     ReasoningDelta(String),
     /// Model requested a tool call
-    ToolCallStart { id: String, name: String },
+    ToolCallStart { id: String, name: String, arguments: serde_json::Value },
     /// Tool call completed
     ToolCallDone { id: String, name: String, output: String, is_error: bool },
     /// Turn complete with usage stats
@@ -152,7 +152,11 @@ impl Agent {
             // Execute tool calls
             for tc in &tool_calls {
                 let _ = event_tx
-                    .send(AgentEvent::ToolCallStart { id: tc.id.clone(), name: tc.name.clone() })
+                    .send(AgentEvent::ToolCallStart {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    })
                     .await;
 
                 let result = self.tools.execute(tc).await;

@@ -63,7 +63,23 @@ enum Commands {
     /// List configured providers and models
     Models,
     /// List saved sessions
-    Sessions,
+    Sessions {
+        /// Filter by model substring (case-insensitive)
+        #[arg(long)]
+        model: Option<String>,
+        /// Include sessions updated within the last N days
+        #[arg(long)]
+        since_days: Option<i64>,
+    },
+    /// Aggregated sessions report for dashboards/BI
+    SessionsReport {
+        /// Filter by model substring (case-insensitive)
+        #[arg(long)]
+        model: Option<String>,
+        /// Include sessions updated within the last N days
+        #[arg(long)]
+        since_days: Option<i64>,
+    },
     /// Delete a session by ID
     DeleteSession { id: String },
     /// Show current config path
@@ -102,7 +118,10 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Some(Commands::Models) => cmd_models(&config, cli.json),
-        Some(Commands::Sessions) => cmd_sessions(cli.json)?,
+        Some(Commands::Sessions { model, since_days }) => cmd_sessions(cli.json, model.as_deref(), since_days)?,
+        Some(Commands::SessionsReport { model, since_days }) => {
+            cmd_sessions_report(cli.json, model.as_deref(), since_days)?
+        }
         Some(Commands::DeleteSession { id }) => cmd_delete_session(&id, cli.json)?,
         Some(Commands::Config) => cmd_config(cli.json)?,
         Some(Commands::Ask { prompt, agent }) => {
@@ -204,18 +223,47 @@ fn cmd_models(config: &Config, json_output: bool) {
     );
 }
 
-fn cmd_sessions(json_output: bool) -> Result<()> {
+fn cmd_sessions(json_output: bool, model_filter: Option<&str>, since_days: Option<i64>) -> Result<()> {
     let store = SessionStore::new()?;
-    let sessions = store.list()?;
+    let mut sessions = store.list()?;
+
+    if let Some(mf) = model_filter {
+        let needle = mf.to_lowercase();
+        sessions.retain(|s| s.model.to_lowercase().contains(&needle));
+    }
+    if let Some(days) = since_days {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days.max(0));
+        sessions.retain(|s| s.updated_at >= cutoff);
+    }
     if json_output {
+        let mut total_messages: usize = 0;
+        let mut total_files_refs: usize = 0;
+        let mut total_todo_open: usize = 0;
+        let mut total_todo_done: usize = 0;
+        let mut file_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
         let payload = sessions
-            .into_iter()
+            .iter()
             .map(|s| {
+                let todo_done = s.todo_items.iter().filter(|t| t.done).count();
+                let todo_open = s.todo_items.len().saturating_sub(todo_done);
+                total_messages += s.messages.len();
+                total_files_refs += s.changed_files.len();
+                total_todo_open += todo_open;
+                total_todo_done += todo_done;
+                for p in &s.changed_files {
+                    *file_freq.entry(p.clone()).or_insert(0) += 1;
+                }
+
                 json!({
                     "id": s.id.to_string(),
-                    "title": s.title,
-                    "model": s.model,
+                    "title": s.title.clone(),
+                    "model": s.model.clone(),
                     "messages": s.messages.len(),
+                    "changed_files": s.changed_files.clone(),
+                    "todo_items": s.todo_items.clone(),
+                    "todo_open": todo_open,
+                    "todo_done": todo_done,
                     "created_at": s.created_at,
                     "updated_at": s.updated_at,
                     "total_cost_usd": s.total_cost_usd,
@@ -223,7 +271,29 @@ fn cmd_sessions(json_output: bool) -> Result<()> {
                 })
             })
             .collect::<Vec<_>>();
-        println!("{}", json!({ "sessions": payload }));
+
+        let mut top_files = file_freq.into_iter().collect::<Vec<_>>();
+        top_files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let top_files = top_files
+            .into_iter()
+            .take(20)
+            .map(|(path, count)| json!({ "path": path, "count": count }))
+            .collect::<Vec<_>>();
+
+        println!(
+            "{}",
+            json!({
+                "sessions": payload,
+                "summary": {
+                    "count": sessions.len(),
+                    "messages_total": total_messages,
+                    "changed_files_total": total_files_refs,
+                    "todo_open_total": total_todo_open,
+                    "todo_done_total": total_todo_done,
+                    "top_changed_files": top_files,
+                }
+            })
+        );
         return Ok(());
     }
 
@@ -235,13 +305,166 @@ fn cmd_sessions(json_output: bool) -> Result<()> {
     for s in sessions {
         let title = s.title.as_deref().unwrap_or("untitled");
         let date = s.updated_at.format("%Y-%m-%d %H:%M");
+        let todo_done = s.todo_items.iter().filter(|t| t.done).count();
+        let todo_open = s.todo_items.len().saturating_sub(todo_done);
         println!(
-            "  {} {} {} {}",
+            "  {} {} {} {} {} {} {}",
             style(&s.id.to_string()[..8]).dim(),
             style(title).white(),
             style(format!("[{}]", s.model)).dim(),
-            style(date.to_string()).dim()
+            style(date.to_string()).dim(),
+            style(format!("files:{}", s.changed_files.len())).dim(),
+            style(format!("todo:{}/{}", todo_done, s.todo_items.len())).dim(),
+            style(format!("open:{}", todo_open)).dim(),
         );
+    }
+    Ok(())
+}
+
+fn cmd_sessions_report(json_output: bool, model_filter: Option<&str>, since_days: Option<i64>) -> Result<()> {
+    let store = SessionStore::new()?;
+    let mut sessions = store.list()?;
+
+    if let Some(mf) = model_filter {
+        let needle = mf.to_lowercase();
+        sessions.retain(|s| s.model.to_lowercase().contains(&needle));
+    }
+    if let Some(days) = since_days {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days.max(0));
+        sessions.retain(|s| s.updated_at >= cutoff);
+    }
+
+    let mut by_model: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    let mut by_day: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    let mut top_file_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut total_messages = 0usize;
+    let mut total_files = 0usize;
+    let mut total_todo_open = 0usize;
+    let mut total_todo_done = 0usize;
+    let mut total_cost = 0.0f64;
+    let mut total_tokens = 0u64;
+
+    for s in &sessions {
+        let todo_done = s.todo_items.iter().filter(|t| t.done).count();
+        let todo_open = s.todo_items.len().saturating_sub(todo_done);
+        total_messages += s.messages.len();
+        total_files += s.changed_files.len();
+        total_todo_open += todo_open;
+        total_todo_done += todo_done;
+        total_cost += s.total_cost_usd;
+        total_tokens += s.total_tokens;
+
+        for p in &s.changed_files {
+            *top_file_counts.entry(p.clone()).or_insert(0) += 1;
+        }
+
+        let model_entry = by_model
+            .entry(s.model.clone())
+            .or_insert_with(|| json!({
+                "sessions": 0usize,
+                "messages": 0usize,
+                "files": 0usize,
+                "todo_open": 0usize,
+                "todo_done": 0usize,
+                "cost_usd": 0.0f64,
+                "tokens": 0u64,
+            }));
+        model_entry["sessions"] = json!(model_entry["sessions"].as_u64().unwrap_or(0) + 1);
+        model_entry["messages"] = json!(model_entry["messages"].as_u64().unwrap_or(0) + s.messages.len() as u64);
+        model_entry["files"] = json!(model_entry["files"].as_u64().unwrap_or(0) + s.changed_files.len() as u64);
+        model_entry["todo_open"] = json!(model_entry["todo_open"].as_u64().unwrap_or(0) + todo_open as u64);
+        model_entry["todo_done"] = json!(model_entry["todo_done"].as_u64().unwrap_or(0) + todo_done as u64);
+        model_entry["cost_usd"] = json!(model_entry["cost_usd"].as_f64().unwrap_or(0.0) + s.total_cost_usd);
+        model_entry["tokens"] = json!(model_entry["tokens"].as_u64().unwrap_or(0) + s.total_tokens);
+
+        let day = s.updated_at.format("%Y-%m-%d").to_string();
+        let day_entry = by_day.entry(day).or_insert_with(|| json!({
+            "sessions": 0usize,
+            "messages": 0usize,
+            "files": 0usize,
+            "todo_open": 0usize,
+            "todo_done": 0usize,
+            "cost_usd": 0.0f64,
+            "tokens": 0u64,
+        }));
+        day_entry["sessions"] = json!(day_entry["sessions"].as_u64().unwrap_or(0) + 1);
+        day_entry["messages"] = json!(day_entry["messages"].as_u64().unwrap_or(0) + s.messages.len() as u64);
+        day_entry["files"] = json!(day_entry["files"].as_u64().unwrap_or(0) + s.changed_files.len() as u64);
+        day_entry["todo_open"] = json!(day_entry["todo_open"].as_u64().unwrap_or(0) + todo_open as u64);
+        day_entry["todo_done"] = json!(day_entry["todo_done"].as_u64().unwrap_or(0) + todo_done as u64);
+        day_entry["cost_usd"] = json!(day_entry["cost_usd"].as_f64().unwrap_or(0.0) + s.total_cost_usd);
+        day_entry["tokens"] = json!(day_entry["tokens"].as_u64().unwrap_or(0) + s.total_tokens);
+    }
+
+    let mut top_files = top_file_counts.into_iter().collect::<Vec<_>>();
+    top_files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let top_files = top_files
+        .into_iter()
+        .take(50)
+        .map(|(path, count)| json!({ "path": path, "count": count }))
+        .collect::<Vec<_>>();
+
+    let mut by_model_vec = by_model.into_iter().collect::<Vec<_>>();
+    by_model_vec.sort_by(|a, b| a.0.cmp(&b.0));
+    let by_model_json = by_model_vec
+        .into_iter()
+        .map(|(model, stats)| json!({ "model": model, "stats": stats }))
+        .collect::<Vec<_>>();
+
+    let mut by_day_vec = by_day.into_iter().collect::<Vec<_>>();
+    by_day_vec.sort_by(|a, b| a.0.cmp(&b.0));
+    let by_day_json = by_day_vec
+        .into_iter()
+        .map(|(day, stats)| json!({ "day": day, "stats": stats }))
+        .collect::<Vec<_>>();
+
+    let report = json!({
+        "summary": {
+            "sessions": sessions.len(),
+            "messages_total": total_messages,
+            "changed_files_total": total_files,
+            "todo_open_total": total_todo_open,
+            "todo_done_total": total_todo_done,
+            "cost_usd_total": total_cost,
+            "tokens_total": total_tokens,
+        },
+        "by_model": by_model_json,
+        "by_day": by_day_json,
+        "top_changed_files": top_files,
+        "filters": {
+            "model": model_filter,
+            "since_days": since_days,
+        }
+    });
+
+    if json_output {
+        println!("{report}");
+    } else {
+        println!("{}", style("Sessions Report").bold().cyan());
+        println!(
+            "  sessions:{} messages:{} files:{} todo_open:{} todo_done:{} cost:${:.5} tokens:{}",
+            sessions.len(),
+            total_messages,
+            total_files,
+            total_todo_open,
+            total_todo_done,
+            total_cost,
+            total_tokens
+        );
+        println!("\n{}", style("By model:").bold());
+        for row in report["by_model"].as_array().unwrap_or(&Vec::new()) {
+            let model = row["model"].as_str().unwrap_or("-");
+            let stats = &row["stats"];
+            println!(
+                "  {} sessions:{} messages:{} files:{} todo_open:{} todo_done:{}",
+                model,
+                stats["sessions"].as_u64().unwrap_or(0),
+                stats["messages"].as_u64().unwrap_or(0),
+                stats["files"].as_u64().unwrap_or(0),
+                stats["todo_open"].as_u64().unwrap_or(0),
+                stats["todo_done"].as_u64().unwrap_or(0),
+            );
+        }
     }
     Ok(())
 }

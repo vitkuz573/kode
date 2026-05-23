@@ -17,6 +17,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> InputAction {
         AppMode::ModelPicker    => handle_model_key(app, key),
         AppMode::ThemePicker    => handle_theme_key(app, key),
         AppMode::CommandPalette => handle_palette_key(app, key),
+        AppMode::TodoManager    => handle_todo_key(app, key),
+        AppMode::ChangedFilesManager => handle_changed_files_key(app, key),
     }
 }
 
@@ -59,6 +61,16 @@ fn handle_chat_key(app: &mut App, key: KeyEvent) -> InputAction {
             app.command_filter.clear();
             app.command_cursor = 0;
             app.mode = AppMode::CommandPalette;
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
+            app.todo_cursor = app.todo_cursor.min(app.session.todo_items.len().saturating_sub(1));
+            app.todo_input.clear();
+            app.mode = AppMode::TodoManager;
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
+            app.changed_files_cursor = 0;
+            app.changed_files_filter.clear();
+            app.mode = AppMode::ChangedFilesManager;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('m')) => {
             app.model_cursor = app.model_list.iter().position(|m| m == &app.model).unwrap_or(0);
@@ -167,6 +179,7 @@ fn handle_session_key(app: &mut App, key: KeyEvent) -> InputAction {
         }
         KeyCode::Enter => {
             if let Some(s) = app.sessions.get(app.session_cursor) {
+                app.session = s.clone();
                 app.messages = s.messages.clone();
                 app.model = s.model.clone();
                 // Rebuild display
@@ -337,6 +350,96 @@ fn execute_command(app: &mut App, key: &str) -> InputAction {
         "Ctrl+N"     => { app.new_session(); }
         "Ctrl+L"     => { app.clear_chat(); }
         "Ctrl+R"     => { return InputAction::RefreshModels; }
+        "Ctrl+Y"     => {
+            app.todo_cursor = app.todo_cursor.min(app.session.todo_items.len().saturating_sub(1));
+            app.todo_input.clear();
+            app.mode = AppMode::TodoManager;
+        }
+        "Ctrl+F"     => {
+            app.changed_files_cursor = 0;
+            app.changed_files_filter.clear();
+            app.mode = AppMode::ChangedFilesManager;
+        }
+        _ => {}
+    }
+    InputAction::None
+}
+
+fn handle_todo_key(app: &mut App, key: KeyEvent) -> InputAction {
+    match key.code {
+        KeyCode::Esc => {
+            app.todo_input.clear();
+            app.mode = AppMode::Chat;
+        }
+        KeyCode::Up => {
+            app.todo_cursor = app.todo_cursor.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            if app.todo_cursor + 1 < app.session.todo_items.len() {
+                app.todo_cursor += 1;
+            }
+        }
+        KeyCode::Char(' ') => {
+            app.toggle_todo_selected();
+        }
+        KeyCode::Char('d') => {
+            app.delete_todo_selected();
+        }
+        KeyCode::Enter => {
+            if app.todo_input.trim().is_empty() {
+                app.toggle_todo_selected();
+            } else {
+                let text = std::mem::take(&mut app.todo_input);
+                app.add_todo(text);
+            }
+        }
+        KeyCode::Backspace => {
+            app.todo_input.pop();
+        }
+        KeyCode::Char(c) => {
+            app.todo_input.push(c);
+        }
+        _ => {}
+    }
+    InputAction::None
+}
+
+fn handle_changed_files_key(app: &mut App, key: KeyEvent) -> InputAction {
+    match key.code {
+        KeyCode::Esc => {
+            app.changed_files_filter.clear();
+            app.mode = AppMode::Chat;
+        }
+        KeyCode::Up => {
+            app.changed_files_cursor = app.changed_files_cursor.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            let max = app.filtered_changed_files().len().saturating_sub(1);
+            if app.changed_files_cursor < max {
+                app.changed_files_cursor += 1;
+            }
+        }
+        KeyCode::Backspace => {
+            app.changed_files_filter.pop();
+            app.changed_files_cursor = 0;
+        }
+        KeyCode::Char('d') => {
+            app.remove_changed_file_at_cursor();
+        }
+        KeyCode::Enter => {
+            let files = app.filtered_changed_files();
+            if let Some(path) = files.get(app.changed_files_cursor) {
+                let insertion = format!("{} ", path);
+                let b = char_to_byte(&app.input, app.cursor);
+                app.input.insert_str(b, &insertion);
+                app.cursor += insertion.chars().count();
+                app.mode = AppMode::Chat;
+            }
+        }
+        KeyCode::Char(c) => {
+            app.changed_files_filter.push(c);
+            app.changed_files_cursor = 0;
+        }
         _ => {}
     }
     InputAction::None

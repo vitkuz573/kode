@@ -47,7 +47,7 @@ async fn run_inner(
     app.chat_messages.push(ChatMessage {
         role: MsgRole::System,
         content: format!(
-            "kode v{}  ·  {}  ·  ^P: palette  ^T: theme  ^K: model  ^B: sidebar  Tab: sessions",
+            "kode v{}  ·  {}  ·  ^P: palette  ^T: theme  ^K: model  ^Y: todo  ^F: files  ^B: sidebar  Tab: sessions",
             env!("CARGO_PKG_VERSION"),
             app.model
         ),

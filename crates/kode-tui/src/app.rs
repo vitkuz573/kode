@@ -2,10 +2,11 @@ use anyhow::Result;
 use kode_agent::AgentEvent;
 use kode_core::{
     config::Config,
-    session::{Session, SessionStore},
+    session::{Session, SessionStore, TodoItem},
     types::Message,
 };
 use kode_llm::ModelRouter;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::theme::{Theme, CATPPUCCIN_MOCHA};
@@ -20,6 +21,8 @@ pub enum AppMode {
     ModelPicker,
     ThemePicker,
     CommandPalette,
+    TodoManager,
+    ChangedFilesManager,
 }
 
 /// A rich rendered message in the chat view
@@ -66,6 +69,8 @@ pub fn all_commands() -> Vec<Command> {
         Command { key: "Ctrl+N",     label: "new session",    description: "Start a new session" },
         Command { key: "Ctrl+L",     label: "clear",          description: "Clear current chat" },
         Command { key: "Ctrl+R",     label: "refresh models", description: "Re-discover models from provider" },
+        Command { key: "Ctrl+Y",     label: "todo",           description: "Open TODO manager" },
+        Command { key: "Ctrl+F",     label: "files",          description: "Open changed files manager" },
         Command { key: "↑↓",         label: "scroll",         description: "Scroll messages" },
         Command { key: "PgUp/PgDn",  label: "page scroll",    description: "Scroll by page" },
         Command { key: "Home/End",   label: "cursor",         description: "Move cursor to start/end" },
@@ -116,6 +121,10 @@ pub struct App {
     pub commands: Vec<Command>,
     pub command_cursor: usize,
     pub command_filter: String,
+    pub todo_cursor: usize,
+    pub todo_input: String,
+    pub changed_files_cursor: usize,
+    pub changed_files_filter: String,
 
     // Stats
     pub total_prompt_tokens: u64,
@@ -170,6 +179,10 @@ impl App {
             commands,
             command_cursor: 0,
             command_filter: String::new(),
+            todo_cursor: 0,
+            todo_input: String::new(),
+            changed_files_cursor: 0,
+            changed_files_filter: String::new(),
             total_prompt_tokens: 0,
             total_completion_tokens: 0,
             total_cost_usd: 0.0,
@@ -348,11 +361,14 @@ impl App {
             AgentEvent::ReasoningDelta(text) => {
                 self.append_reasoning_delta(&text);
             }
-            AgentEvent::ToolCallStart { name, .. } => {
+            AgentEvent::ToolCallStart { name, arguments, .. } => {
                 self.add_tool_call(&name);
+                self.track_changed_files_from_tool_start(&name, &arguments);
             }
-            AgentEvent::ToolCallDone { name, output, is_error, .. } => {
+            AgentEvent::ToolCallDone { id, name, output, is_error } => {
                 self.finish_tool_call(&name, &output, is_error);
+                self.messages.push(Message::tool_result(id.clone(), output.clone()));
+                self.session.push(Message::tool_result(id, output));
             }
             AgentEvent::TurnDone { prompt_tokens, completion_tokens, .. } => {
                 self.total_prompt_tokens += prompt_tokens;
@@ -360,11 +376,13 @@ impl App {
                 self.total_cost_usd += (prompt_tokens as f64 / 1_000_000.0) * 1.0
                     + (completion_tokens as f64 / 1_000_000.0) * 3.0;
                 self.thinking = false;
+                self.persist_assistant_artifacts();
                 self.finish_assistant_message();
                 let _ = self.store.save(&self.session);
             }
             AgentEvent::Done => {
                 self.thinking = false;
+                self.persist_assistant_artifacts();
                 self.finish_assistant_message();
                 let _ = self.store.save(&self.session);
             }
@@ -393,6 +411,153 @@ impl App {
                 || c.description.to_lowercase().contains(&f)
                 || c.key.to_lowercase().contains(&f)
         }).collect()
+    }
+
+    fn track_changed_files_from_tool_start(&mut self, tool_name: &str, args: &serde_json::Value) {
+        if tool_name == "write_file" {
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                self.add_changed_file(path);
+            }
+        }
+    }
+
+    fn add_changed_file(&mut self, path: &str) {
+        let normalized = path.trim();
+        if normalized.is_empty() {
+            return;
+        }
+        if !self.session.changed_files.iter().any(|p| p == normalized) {
+            self.session.changed_files.push(normalized.to_string());
+            self.session.updated_at = chrono::Utc::now();
+        }
+    }
+
+    fn persist_assistant_artifacts(&mut self) {
+        let Some(last) = self.chat_messages.last() else { return; };
+        if last.role != MsgRole::Assistant {
+            return;
+        }
+        let assistant_content = last.content.clone();
+
+        let exists = self.messages.iter().rev().find(|m| matches!(m.role, kode_core::types::Role::Assistant));
+        let should_push = exists.map(|m| m.content != assistant_content).unwrap_or(true);
+        if should_push && !assistant_content.trim().is_empty() {
+            let msg = Message::assistant(assistant_content.clone());
+            self.messages.push(msg.clone());
+            self.session.push(msg);
+        }
+
+        self.update_todos_from_assistant(&assistant_content);
+    }
+
+    fn update_todos_from_assistant(&mut self, text: &str) {
+        let mut existing: HashSet<String> = self
+            .session
+            .todo_items
+            .iter()
+            .map(|t| t.text.to_lowercase())
+            .collect();
+
+        for raw in text.lines() {
+            let line = raw.trim();
+            let (done, payload) = if let Some(s) = line.strip_prefix("- [ ] ") {
+                (false, s)
+            } else if let Some(s) = line.strip_prefix("* [ ] ") {
+                (false, s)
+            } else if let Some(s) = line.strip_prefix("- [x] ") {
+                (true, s)
+            } else if let Some(s) = line.strip_prefix("- [X] ") {
+                (true, s)
+            } else if let Some(s) = line.strip_prefix("* [x] ") {
+                (true, s)
+            } else if let Some(s) = line.strip_prefix("* [X] ") {
+                (true, s)
+            } else {
+                continue;
+            };
+
+            let todo_text = payload.trim();
+            if todo_text.is_empty() {
+                continue;
+            }
+
+            if let Some(existing_item) = self
+                .session
+                .todo_items
+                .iter_mut()
+                .find(|t| t.text.eq_ignore_ascii_case(todo_text))
+            {
+                existing_item.done = done;
+                continue;
+            }
+
+            if existing.insert(todo_text.to_lowercase()) {
+                self.session.todo_items.push(TodoItem {
+                    text: todo_text.to_string(),
+                    done,
+                });
+            }
+        }
+    }
+
+    pub fn toggle_todo_selected(&mut self) {
+        if let Some(item) = self.session.todo_items.get_mut(self.todo_cursor) {
+            item.done = !item.done;
+            self.session.updated_at = chrono::Utc::now();
+            let _ = self.store.save(&self.session);
+        }
+    }
+
+    pub fn delete_todo_selected(&mut self) {
+        if self.todo_cursor < self.session.todo_items.len() {
+            self.session.todo_items.remove(self.todo_cursor);
+            self.todo_cursor = self.todo_cursor.saturating_sub(1);
+            self.session.updated_at = chrono::Utc::now();
+            let _ = self.store.save(&self.session);
+        }
+    }
+
+    pub fn add_todo(&mut self, text: String) {
+        let todo_text = text.trim();
+        if todo_text.is_empty() {
+            return;
+        }
+        if self
+            .session
+            .todo_items
+            .iter()
+            .any(|t| t.text.eq_ignore_ascii_case(todo_text))
+        {
+            return;
+        }
+        self.session.todo_items.push(TodoItem {
+            text: todo_text.to_string(),
+            done: false,
+        });
+        self.todo_cursor = self.session.todo_items.len().saturating_sub(1);
+        self.session.updated_at = chrono::Utc::now();
+        let _ = self.store.save(&self.session);
+    }
+
+    pub fn filtered_changed_files(&self) -> Vec<&str> {
+        let needle = self.changed_files_filter.to_lowercase();
+        self.session
+            .changed_files
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|p| needle.is_empty() || p.to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    pub fn remove_changed_file_at_cursor(&mut self) {
+        let filtered = self.filtered_changed_files();
+        let Some(target) = filtered.get(self.changed_files_cursor).map(|s| s.to_string()) else { return; };
+        self.session.changed_files.retain(|p| p != &target);
+        self.changed_files_cursor = self
+            .changed_files_cursor
+            .min(self.filtered_changed_files().len().saturating_sub(1));
+        self.session.updated_at = chrono::Utc::now();
+        let _ = self.store.save(&self.session);
     }
 }
 
